@@ -17,7 +17,7 @@ COPY --from=rinha-resources . /opt/rinha/resources
 ENV RINHA_RESOURCES_DIR=/opt/rinha/resources
 ENV RINHA_INDEX_DIR=/opt/rinha/index
 ENV RINHA_IVF_CLUSTERS=256
-ENV RINHA_IVF_PROBES=4
+ENV RINHA_IVF_PROBES=8
 ENV RINHA_IVF_SAMPLE_SIZE=32768
 ENV RINHA_KMEANS_ITERATIONS=8
 RUN java \
@@ -67,7 +67,6 @@ ENTRYPOINT [ \
     "-XX:+AlwaysPreTouch", \
     "-XX:-UsePerfData", \
     "-XX:+DisableExplicitGC", \
-    "-XX:TieredStopAtLevel=1", \
     "-Dfile.encoding=UTF-8", \
     "-jar", "/app/app.jar" \
 ]
