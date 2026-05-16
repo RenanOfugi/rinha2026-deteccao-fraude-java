@@ -1,0 +1,53 @@
+services:
+  api1:
+    build:
+      context: .
+      additional_contexts:
+        rinha-resources: ../rinha-de-backend-2026/resources
+    environment:
+      RINHA_UDS_PATH: /sockets/api1.sock
+      RINHA_IVF_PROBES: "4"
+      RINHA_HTTP_WORKERS: "1"
+    volumes:
+      - api-sockets:/sockets
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "150MB"
+
+  api2:
+    build:
+      context: .
+      additional_contexts:
+        rinha-resources: ../rinha-de-backend-2026/resources
+    environment:
+      RINHA_UDS_PATH: /sockets/api2.sock
+      RINHA_IVF_PROBES: "4"
+      RINHA_HTTP_WORKERS: "1"
+    volumes:
+      - api-sockets:/sockets
+    deploy:
+      resources:
+        limits:
+          cpus: "0.45"
+          memory: "150MB"
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      - api1
+      - api2
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - api-sockets:/sockets
+    deploy:
+      resources:
+        limits:
+          cpus: "0.10"
+          memory: "40MB"
+
+volumes:
+  api-sockets:
