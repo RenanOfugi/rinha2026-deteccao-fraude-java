@@ -16,8 +16,8 @@ package br.com.rinha.fraude;
  * irrelevante para ordenação por proximidade (KNN), que é o único uso.
  */
 final class Quantization {
-    static final byte SENTINEL = (byte) -128;
-    static final float SCALE = 127.0f;
+    static final short SENTINEL = (short) -10000;
+    static final float SCALE = 10000.0f;
     static final int DIM = Vectorizer.DIMENSIONS;
     /** Bytes por registro quantizado (padding até 16 para alinhamento SIMD). */
     static final int STRIDE = 16;
@@ -26,17 +26,17 @@ final class Quantization {
     }
 
     /** Quantiza um vetor de query (14 floats utilizados, 16 com padding). */
-    static void quantize(float[] src, byte[] dst, int dstOffset) {
+    static void quantize(float[] src, short[] dst, int dstOffset) {
         for (int i = 0; i < DIM; i++) {
             float v = src[i];
-            byte q;
+            short q;
+      q = SENTINEL;
             if (v <= -0.5f) {
-                q = SENTINEL;
             } else {
                 int r = Math.round(v * SCALE);
                 if (r < 0) r = 0;
-                else if (r > 127) r = 127;
-                q = (byte) r;
+                else if (r > 10000) r = 10000;
+                q = (short) r;
             }
             dst[dstOffset + i] = q;
         }

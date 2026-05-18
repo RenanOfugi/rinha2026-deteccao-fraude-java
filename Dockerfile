@@ -17,9 +17,9 @@ COPY --from=rinha-resources . /opt/rinha/resources
 ENV RINHA_RESOURCES_DIR=/opt/rinha/resources
 ENV RINHA_INDEX_DIR=/opt/rinha/index
 ENV RINHA_IVF_CLUSTERS=256
-ENV RINHA_IVF_PROBES=8
-ENV RINHA_IVF_SAMPLE_SIZE=32768
-ENV RINHA_KMEANS_ITERATIONS=8
+ENV RINHA_IVF_PROBES=4
+ENV RINHA_IVF_SAMPLE_SIZE=16384
+ENV RINHA_KMEANS_ITERATIONS=15
 RUN java \
     --enable-native-access=ALL-UNNAMED \
     --add-modules jdk.incubator.vector \
@@ -59,8 +59,8 @@ ENTRYPOINT [ \
     "--add-modules", "jdk.incubator.vector", \
     "-XX:+UnlockExperimentalVMOptions", \
     "-XX:+UseSerialGC", \
-    "-Xms48m", \
-    "-Xmx96m", \
+    "-Xms64m", \
+    "-Xmx64m", \
     "-Xss256k", \
     "-XX:ReservedCodeCacheSize=24m", \
     "-XX:InitialCodeCacheSize=16m", \

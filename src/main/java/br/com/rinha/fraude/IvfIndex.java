@@ -10,41 +10,36 @@ import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 
 /**
- * Índice IVF com vetores quantizados em int8.
+ * Índice IVF com vetores quantizados em int16 (scale=10000).
  *
- * Layout em memória:
- *   - vectors.bin: para cada vetor, {@link Quantization#STRIDE} bytes em int8.
- *                  Vetores são agrupados por bucket (cluster).
- *   - labels.bin: 1 byte por vetor (0=legit, 1=fraud), na mesma ordem.
- *   - meta.bin: header + centroides quantizados + bucketOffsets[clusterCount+1].
+ * Layout em disco:
+ * - vectors.bin: para cada vetor, STRIDE shorts (int16). Agrupados por bucket.
+ * - labels.bin:  1 byte por vetor (0=legit, 1=fraud).
+ * - meta.bin:    header + centroides int16 + bucketOffsets[clusterCount+1].
  *
- * Operação de busca:
- *   1. Quantiza a query int8.
- *   2. Para cada centroide, calcula distância int8 e seleciona os `nprobe` melhores.
- *   3. Para cada bucket sondado, percorre os vetores e calcula distância int8.
- *   4. Mantém um heap top-K via inserção linear (K=5).
+ * Distâncias em long: diff máx = 20000, diff² = 400_000_000,
+ * soma de 14 dims = 5_600_000_000 > Integer.MAX_VALUE.
  */
 final class IvfIndex implements AutoCloseable {
 
     final int clusterCount;
     final int totalVectors;
     final int probes;
-    final byte[] centroids;
+    final short[] centroids;
     final long[] bucketOffsets;
     private final Arena arena;
     private final MemorySegment vectorSegment;
     private final MemorySegment labelSegment;
 
     private IvfIndex(
-        int clusterCount,
-        int totalVectors,
-        int probes,
-        byte[] centroids,
-        long[] bucketOffsets,
-        Arena arena,
-        MemorySegment vectorSegment,
-        MemorySegment labelSegment
-    ) {
+            int clusterCount,
+            int totalVectors,
+            int probes,
+            short[] centroids,
+            long[] bucketOffsets,
+            Arena arena,
+            MemorySegment vectorSegment,
+            MemorySegment labelSegment) {
         this.clusterCount = clusterCount;
         this.totalVectors = totalVectors;
         this.probes = probes;
@@ -56,11 +51,14 @@ final class IvfIndex implements AutoCloseable {
     }
 
     static IvfIndex load(AppConfig config) throws IOException {
-        try (DataInputStream input = new DataInputStream(Files.newInputStream(config.metadataFile()))) {
+        try (DataInputStream input = new DataInputStream(
+                Files.newInputStream(config.metadataFile()))) {
+
             int magic = input.readInt();
             int version = input.readInt();
             if (magic != IvfIndexBuilder.MAGIC || version != IvfIndexBuilder.VERSION) {
-                throw new IOException("Indice em formato incompatível (magic=" + Integer.toHexString(magic) + ", version=" + version + "). Rebuild necessário.");
+                throw new IOException("Indice incompatível (magic="
+                        + Integer.toHexString(magic) + ", version=" + version + ")");
             }
             int dimensions = input.readInt();
             int stride = input.readInt();
@@ -70,74 +68,85 @@ final class IvfIndex implements AutoCloseable {
             if (dimensions != Vectorizer.DIMENSIONS || stride != Quantization.STRIDE) {
                 throw new IOException("Dimensoes incompatíveis no indice");
             }
-            byte[] centroids = new byte[clusterCount * stride];
-            input.readFully(centroids);
+
+            // centroids: clusterCount × STRIDE shorts
+            short[] centroids = new short[clusterCount * Quantization.STRIDE];
+            for (int i = 0; i < centroids.length; i++) {
+                centroids[i] = input.readShort();
+            }
+
             long[] bucketOffsets = new long[clusterCount + 1];
             for (int i = 0; i < bucketOffsets.length; i++) {
                 bucketOffsets[i] = input.readLong();
             }
+
             Arena arena = Arena.ofShared();
             MemorySegment vectorSegment;
             MemorySegment labelSegment;
-            try (FileChannel vectorChannel = FileChannel.open(config.vectorsFile(), StandardOpenOption.READ);
-                 FileChannel labelChannel = FileChannel.open(config.labelsFile(), StandardOpenOption.READ)) {
-                vectorSegment = vectorChannel.map(FileChannel.MapMode.READ_ONLY, 0L, vectorChannel.size(), arena);
-                labelSegment = labelChannel.map(FileChannel.MapMode.READ_ONLY, 0L, labelChannel.size(), arena);
+            try (FileChannel vc = FileChannel.open(config.vectorsFile(), StandardOpenOption.READ);
+                 FileChannel lc = FileChannel.open(config.labelsFile(), StandardOpenOption.READ)) {
+                vectorSegment = vc.map(FileChannel.MapMode.READ_ONLY, 0L, vc.size(), arena);
+                labelSegment  = lc.map(FileChannel.MapMode.READ_ONLY, 0L, lc.size(), arena);
             }
+
             int effectiveProbes = Math.max(1, Math.min(config.ivfProbes, clusterCount));
             prefetch(vectorSegment);
             prefetch(labelSegment);
-            return new IvfIndex(
-                clusterCount,
-                totalVectors,
-                effectiveProbes,
-                centroids,
-                bucketOffsets,
-                arena,
-                vectorSegment,
-                labelSegment
-            );
+
+            return new IvfIndex(clusterCount, totalVectors, effectiveProbes,
+                    centroids, bucketOffsets, arena, vectorSegment, labelSegment);
         }
     }
 
     int search(float[] queryFloat, SearchScratch scratch) {
         scratch.reset();
-        byte[] queryQuant = scratch.queryQuant;
+        short[] queryQuant = scratch.queryQuant;
         Quantization.quantize(queryFloat, queryQuant, 0);
 
+        // Fase 1: selecionar os `probes` centroides mais próximos
+        final short[] cents = centroids;
         final int clusters = clusterCount;
-        final byte[] cents = centroids;
         for (int centroidId = 0; centroidId < clusters; centroidId++) {
-            int distance = QuantDistanceKernel.squared(cents, centroidId * Quantization.STRIDE, queryQuant);
+            long distance = QuantDistanceKernel.squared(
+                    cents, centroidId * Quantization.STRIDE, queryQuant);
             scratch.offerCentroid(centroidId, distance);
         }
 
+        // Fase 2: varrer os buckets selecionados em chunks
         final int[] probeIds = scratch.bestCentroidIds;
-        final byte[] bucketBuffer = scratch.quantBucketBuffer;
+        final short[] bucketBuffer = scratch.quantBucketBuffer;
         final byte[] labelBuffer = scratch.labelBuffer;
         final int chunkCap = SearchScratch.BUCKET_CHUNK;
+
         for (int i = 0; i < probeIds.length; i++) {
             int centroidId = probeIds[i];
-            if (centroidId < 0) {
-                break;
-            }
+            if (centroidId < 0) break;
+
             long start = bucketOffsets[centroidId];
-            long end = bucketOffsets[centroidId + 1];
+            long end   = bucketOffsets[centroidId + 1];
             long count = end - start;
             if (count <= 0L) continue;
 
             long rOffset = 0L;
             long remaining = count;
             while (remaining > 0L) {
-                int chunk = (int) Math.min(remaining, (long) chunkCap);
-                int bytes = chunk * Quantization.STRIDE;
-                long byteOffset = (start + rOffset) * Quantization.STRIDE;
-                MemorySegment.copy(vectorSegment, ValueLayout.JAVA_BYTE, byteOffset, bucketBuffer, 0, bytes);
-                MemorySegment.copy(labelSegment, ValueLayout.JAVA_BYTE, start + rOffset, labelBuffer, 0, chunk);
+                int chunk = (int) Math.min(remaining, chunkCap);
+
+                // Offset em bytes no vectorSegment:
+                // cada vetor ocupa STRIDE shorts = STRIDE * Short.BYTES bytes
+                long byteOffset = (start + rOffset) * Quantization.STRIDE * Short.BYTES;
+                MemorySegment.copy(vectorSegment, ValueLayout.JAVA_SHORT,
+                        byteOffset, bucketBuffer, 0,  chunk * Quantization.STRIDE);
+
+                MemorySegment.copy(labelSegment, ValueLayout.JAVA_BYTE,
+                        start + rOffset, labelBuffer, 0, chunk);
+
                 for (int v = 0; v < chunk; v++) {
-                    int distance = QuantDistanceKernel.squared(bucketBuffer, v * Quantization.STRIDE, queryQuant);
+                    long distance = QuantDistanceKernel.squared(
+                            bucketBuffer, v * Quantization.STRIDE, queryQuant);
                     scratch.offerNeighbor(distance, labelBuffer[v]);
                 }
+
                 rOffset += chunk;
                 remaining -= chunk;
             }
@@ -152,13 +161,11 @@ final class IvfIndex implements AutoCloseable {
 
     private static void prefetch(MemorySegment segment) {
         long size = segment.byteSize();
-        long step = 4096L;
         long acc = 0L;
-        for (long off = 0; off < size; off += step) {
-            acc += segment.get(ValueLayout.JAVA_BYTE, off);
+        // Toca uma short por página (4096 bytes = 2048 shorts)
+        for (long off = 0; off < size - 1; off += 4096L) {
+            acc += segment.get(ValueLayout.JAVA_SHORT, off);
         }
-        if (acc == Long.MIN_VALUE) {
-            System.out.println("prefetch sink: " + acc);
-        }
+        if (acc == Long.MIN_VALUE) System.out.print(""); // sink para evitar eliminação pelo JIT
     }
 }

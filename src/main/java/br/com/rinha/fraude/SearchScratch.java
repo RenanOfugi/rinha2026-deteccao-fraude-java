@@ -6,30 +6,31 @@ final class SearchScratch {
     static final int K = 5;
     static final int BUCKET_CHUNK = 1024;
 
-    final int[] bestDistances = new int[K];
+    final long[] bestDistances = new long[K];
     final byte[] bestLabels = new byte[K];
-    final int[] bestCentroidDistances;
+    final long[] bestCentroidDistances;
     final int[] bestCentroidIds;
-    final byte[] quantBucketBuffer = new byte[BUCKET_CHUNK * Quantization.STRIDE];
+    final short[] quantBucketBuffer = new short[BUCKET_CHUNK * Quantization.STRIDE];
     final byte[] labelBuffer = new byte[BUCKET_CHUNK];
-    final byte[] queryQuant = new byte[Quantization.STRIDE];
+    final short[] queryQuant = new short[Quantization.STRIDE];
     int size;
 
     SearchScratch(int clusterCount, int probes) {
-        this.bestCentroidDistances = new int[probes];
+        this.bestCentroidDistances = new long[probes];
         this.bestCentroidIds = new int[probes];
-        Arrays.fill(bestDistances, Integer.MAX_VALUE);
+        Arrays.fill(bestDistances, Long.MAX_VALUE);
+        Arrays.fill(bestCentroidDistances, Long.MAX_VALUE);
     }
 
     void reset() {
-        Arrays.fill(bestDistances, Integer.MAX_VALUE);
+        Arrays.fill(bestDistances, Long.MAX_VALUE);
         Arrays.fill(bestLabels, (byte) 0);
-        Arrays.fill(bestCentroidDistances, Integer.MAX_VALUE);
+        Arrays.fill(bestCentroidDistances, Long.MAX_VALUE);
         Arrays.fill(bestCentroidIds, -1);
         size = 0;
     }
 
-    void offerNeighbor(int distance, byte label) {
+    void offerNeighbor(long distance, byte label) {
         int currentSize = size;
         if (currentSize == K && distance >= bestDistances[K - 1]) {
             return;
@@ -47,7 +48,7 @@ final class SearchScratch {
         bestLabels[insertAt] = label;
     }
 
-    void offerCentroid(int centroidId, int distance) {
+    void offerCentroid(int centroidId, long distance) {
         int last = bestCentroidDistances.length - 1;
         if (distance >= bestCentroidDistances[last]) {
             return;
