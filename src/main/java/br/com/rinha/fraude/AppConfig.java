@@ -8,6 +8,7 @@ final class AppConfig {
     final Path indexDir;
     final int ivfClusters;
     final int ivfProbes;
+    final int ivfRefineProbes;
     final int ivfSampleSize;
     final int kmeansIterations;
     final int httpWorkers;
@@ -20,6 +21,7 @@ final class AppConfig {
         Path indexDir,
         int ivfClusters,
         int ivfProbes,
+        int ivfRefineProbes,
         int ivfSampleSize,
         int kmeansIterations,
         int httpWorkers,
@@ -31,6 +33,7 @@ final class AppConfig {
         this.indexDir = indexDir;
         this.ivfClusters = ivfClusters;
         this.ivfProbes = ivfProbes;
+        this.ivfRefineProbes = ivfRefineProbes;
         this.ivfSampleSize = ivfSampleSize;
         this.kmeansIterations = kmeansIterations;
         this.httpWorkers = httpWorkers;
@@ -47,6 +50,7 @@ final class AppConfig {
             Path.of(stringEnv("RINHA_INDEX_DIR", "./data/index")),
             intEnv("RINHA_IVF_CLUSTERS", 256),
             intEnv("RINHA_IVF_PROBES", 6),
+            intEnv("RINHA_IVF_REFINE_PROBES", 10),
             intEnv("RINHA_IVF_SAMPLE_SIZE", 16_384),
             intEnv("RINHA_KMEANS_ITERATIONS", 6),
             intEnv("RINHA_HTTP_WORKERS", 1),

@@ -25,6 +25,7 @@ final class IvfIndex implements AutoCloseable {
     final int clusterCount;
     final int totalVectors;
     final int probes;
+    final int refineProbes;
     final short[] centroids;
     final long[] bucketOffsets;
     private final Arena arena;
@@ -35,6 +36,7 @@ final class IvfIndex implements AutoCloseable {
             int clusterCount,
             int totalVectors,
             int probes,
+            int refineProbes,
             short[] centroids,
             long[] bucketOffsets,
             Arena arena,
@@ -43,6 +45,7 @@ final class IvfIndex implements AutoCloseable {
         this.clusterCount = clusterCount;
         this.totalVectors = totalVectors;
         this.probes = probes;
+        this.refineProbes = refineProbes;
         this.centroids = centroids;
         this.bucketOffsets = bucketOffsets;
         this.arena = arena;
@@ -90,10 +93,11 @@ final class IvfIndex implements AutoCloseable {
             }
 
             int effectiveProbes = Math.max(1, Math.min(config.ivfProbes, clusterCount));
+            int effectiveRefineProbes = Math.max(effectiveProbes, Math.min(config.ivfRefineProbes, clusterCount));
             prefetch(vectorSegment);
             prefetch(labelSegment);
 
-            return new IvfIndex(clusterCount, totalVectors, effectiveProbes,
+            return new IvfIndex(clusterCount, totalVectors, effectiveProbes, effectiveRefineProbes,
                     centroids, bucketOffsets, arena, vectorSegment, labelSegment);
         }
     }
@@ -103,7 +107,7 @@ final class IvfIndex implements AutoCloseable {
         short[] queryQuant = scratch.queryQuant;
         Quantization.quantize(queryFloat, queryQuant, 0);
 
-        // Fase 1: selecionar os `probes` centroides mais próximos
+        // Fase 1: selecionar os centroides mais próximos até o limite de refinamento.
         final short[] cents = centroids;
         final int clusters = clusterCount;
         for (int centroidId = 0; centroidId < clusters; centroidId++) {
@@ -112,13 +116,24 @@ final class IvfIndex implements AutoCloseable {
             scratch.offerCentroid(centroidId, distance);
         }
 
-        // Fase 2: varrer os buckets selecionados em chunks
+        scanBuckets(scratch, 0, probes);
+        int score = scratch.scoreIndex();
+        if (refineProbes > probes && (score == 2 || score == 3)) {
+            scanBuckets(scratch, probes, refineProbes);
+            score = scratch.scoreIndex();
+        }
+        return score;
+    }
+
+    private void scanBuckets(SearchScratch scratch, int fromProbe, int toProbe) {
         final int[] probeIds = scratch.bestCentroidIds;
         final short[] bucketBuffer = scratch.quantBucketBuffer;
+        final short[] queryQuant = scratch.queryQuant;
         final byte[] labelBuffer = scratch.labelBuffer;
         final int chunkCap = SearchScratch.BUCKET_CHUNK;
 
-        for (int i = 0; i < probeIds.length; i++) {
+        int limit = Math.min(toProbe, probeIds.length);
+        for (int i = fromProbe; i < limit; i++) {
             int centroidId = probeIds[i];
             if (centroidId < 0) break;
 
@@ -151,7 +166,6 @@ final class IvfIndex implements AutoCloseable {
                 remaining -= chunk;
             }
         }
-        return scratch.scoreIndex();
     }
 
     @Override
