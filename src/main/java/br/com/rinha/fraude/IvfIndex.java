@@ -118,7 +118,7 @@ final class IvfIndex implements AutoCloseable {
 
         scanBuckets(scratch, 0, probes);
         int score = scratch.scoreIndex();
-        if (refineProbes > probes && (score == 2 || score == 3)) {
+        if (refineProbes > probes && scratch.shouldRefine(score)) {
             scanBuckets(scratch, probes, refineProbes);
             score = scratch.scoreIndex();
         }

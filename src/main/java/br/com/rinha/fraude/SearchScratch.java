@@ -86,4 +86,28 @@ final class SearchScratch {
         if (idx > K) return K;
         return idx;
     }
+
+    boolean shouldRefine(int score) {
+        if (size != K) {
+            return false;
+        }
+        if (score == 2) {
+            return matchesLabels(1, 0, 1, 0, 0)
+                || matchesLabels(0, 1, 1, 0, 0)
+                || matchesLabels(0, 1, 0, 1, 0);
+        }
+        if (score == 3) {
+            return matchesLabels(1, 0, 0, 1, 1)
+                || matchesLabels(0, 0, 1, 1, 1);
+        }
+        return false;
+    }
+
+    private boolean matchesLabels(int l0, int l1, int l2, int l3, int l4) {
+        return bestLabels[0] == l0
+            && bestLabels[1] == l1
+            && bestLabels[2] == l2
+            && bestLabels[3] == l3
+            && bestLabels[4] == l4;
+    }
 }

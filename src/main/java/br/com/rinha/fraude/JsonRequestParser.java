@@ -2,10 +2,30 @@ package br.com.rinha.fraude;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 
 final class JsonRequestParser {
     private static final int BUFFER_SIZE = 8192;
+    private static final double[] POW10 = {
+        1.0d,
+        10.0d,
+        100.0d,
+        1_000.0d,
+        10_000.0d,
+        100_000.0d,
+        1_000_000.0d,
+        10_000_000.0d,
+        100_000_000.0d,
+        1_000_000_000.0d,
+        10_000_000_000.0d,
+        100_000_000_000.0d,
+        1_000_000_000_000.0d,
+        10_000_000_000_000.0d,
+        100_000_000_000_000.0d,
+        1_000_000_000_000_000.0d,
+        10_000_000_000_000_000.0d,
+        100_000_000_000_000_000.0d,
+        1_000_000_000_000_000_000.0d
+    };
 
     // FNV-1a 32-bit das chaves esperadas no payload — checadas após confirmar length+conteúdo.
     private static final int K_TRANSACTION       = fnv("transaction");
@@ -311,14 +331,18 @@ final class JsonRequestParser {
 
     private double parseDouble() {
         int start = position;
+        boolean hasExponent = false;
         while (position < limit) {
             byte c = buffer[position];
+            if (c == 'e' || c == 'E') {
+                hasExponent = true;
+            }
             if ((c < '0' || c > '9') && c != '-' && c != '.' && c != 'e' && c != 'E' && c != '+') {
                 break;
             }
             position++;
         }
-        return Double.parseDouble(new String(buffer, start, position - start, StandardCharsets.US_ASCII));
+        return parseDoubleAscii(buffer, start, position, hasExponent);
     }
 
     private static long parseLongAscii(byte[] data, int offset, int length) {
@@ -334,6 +358,69 @@ final class JsonRequestParser {
         while (i < end) {
             value = value * 10 + (data[i] - '0');
             i++;
+        }
+        return negative ? -value : value;
+    }
+
+    private static double parseDoubleAscii(byte[] data, int start, int end, boolean hasExponent) {
+        int i = start;
+        boolean negative = false;
+        if (i < end && data[i] == '-') {
+            negative = true;
+            i++;
+        } else if (i < end && data[i] == '+') {
+            i++;
+        }
+
+        long mantissa = 0L;
+        int fractionalDigits = 0;
+        boolean fractional = false;
+        int exponent = 0;
+        while (i < end) {
+            byte c = data[i++];
+            if (c >= '0' && c <= '9') {
+                mantissa = (mantissa * 10L) + (c - '0');
+                if (fractional) {
+                    fractionalDigits++;
+                }
+            } else if (c == '.') {
+                fractional = true;
+            } else if (c == 'e' || c == 'E') {
+                exponent = parseExponent(data, i, end);
+                break;
+            }
+        }
+
+        double value;
+        int scale = fractionalDigits - exponent;
+        if (!hasExponent && scale >= 0 && scale < POW10.length) {
+            value = mantissa / POW10[scale];
+        } else if (scale >= 0 && scale < POW10.length) {
+            value = mantissa / POW10[scale];
+        } else if (scale < 0 && -scale < POW10.length) {
+            value = mantissa * POW10[-scale];
+        } else {
+            value = mantissa * Math.pow(10.0d, -scale);
+        }
+        return negative ? -value : value;
+    }
+
+    private static int parseExponent(byte[] data, int start, int end) {
+        int i = start;
+        boolean negative = false;
+        if (i < end && data[i] == '-') {
+            negative = true;
+            i++;
+        } else if (i < end && data[i] == '+') {
+            i++;
+        }
+        int value = 0;
+        while (i < end) {
+            byte c = data[i++];
+            if (c < '0' || c > '9') {
+                break;
+            }
+            value = (value * 10) + (c - '0');
         }
         return negative ? -value : value;
     }

@@ -13,7 +13,7 @@ WORKDIR /work
 COPY --from=build /workspace/target/deteccao-fraude-java-1.0.0-SNAPSHOT.jar /work/app.jar
 # Os arquivos de referência são providos via "additional_contexts: rinha-resources"
 # no docker-compose. Esse path só existe durante o build.
-COPY --from=rinha-resources . /opt/rinha/resources
+COPY src/main/resources  /opt/rinha/resources
 ENV RINHA_RESOURCES_DIR=/opt/rinha/resources
 ENV RINHA_INDEX_DIR=/opt/rinha/index
 ENV RINHA_IVF_CLUSTERS=256
