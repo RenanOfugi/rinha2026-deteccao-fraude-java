@@ -1,8 +1,6 @@
 services:
   api1:
     image: renanofugi/rinha2026-deteccao-fraude:v1
-    build:
-      context: .
     environment:
       RINHA_UDS_PATH: /sockets/api1.sock
       RINHA_IVF_PROBES: "4"
@@ -18,8 +16,6 @@ services:
 
   api2:
     image: renanofugi/rinha2026-deteccao-fraude:v1
-    build:
-      context: .
     environment:
       RINHA_UDS_PATH: /sockets/api2.sock
       RINHA_IVF_PROBES: "4"
