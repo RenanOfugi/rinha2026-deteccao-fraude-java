@@ -1,6 +1,6 @@
 services:
   api1:
-    image: renanofugi/rinha2026-deteccao-fraude:latest
+    image: renanofugi/rinha2026-deteccao-fraude:v1
     build:
       context: .
       additional_contexts:
@@ -19,7 +19,7 @@ services:
           memory: "160MB"
 
   api2:
-    image: renanofugi/rinha2026-deteccao-fraude:latest
+    image: renanofugi/rinha2026-deteccao-fraude:v1
     build:
       context: .
       additional_contexts:
