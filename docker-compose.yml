@@ -3,8 +3,6 @@ services:
     image: renanofugi/rinha2026-deteccao-fraude:latest
     build:
       context: .
-      additional_contexts:
-        rinha-resources: ../rinha-de-backend-2026/resources
     environment:
       RINHA_UDS_PATH: /sockets/api1.sock
       RINHA_IVF_PROBES: "4"
@@ -22,8 +20,6 @@ services:
     image: renanofugi/rinha2026-deteccao-fraude:latest
     build:
       context: .
-      additional_contexts:
-        rinha-resources: ../rinha-de-backend-2026/resources
     environment:
       RINHA_UDS_PATH: /sockets/api2.sock
       RINHA_IVF_PROBES: "4"
