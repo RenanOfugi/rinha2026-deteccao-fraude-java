@@ -3,7 +3,7 @@ services:
     image: renanofugi/rinha2026-deteccao-fraude:v1
     environment:
       RINHA_UDS_PATH: /sockets/api1.sock
-      RINHA_IVF_PROBES: "4"
+      RINHA_IVF_PROBES: "6"
       RINHA_IVF_REFINE_PROBES: "8"
       RINHA_HTTP_WORKERS: "1"
     volumes:
@@ -11,14 +11,14 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "160MB"
+          cpus: "0.47"
+          memory: "165MB"
 
   api2:
     image: renanofugi/rinha2026-deteccao-fraude:v1
     environment:
       RINHA_UDS_PATH: /sockets/api2.sock
-      RINHA_IVF_PROBES: "4"
+      RINHA_IVF_PROBES: "6"
       RINHA_IVF_REFINE_PROBES: "8"
       RINHA_HTTP_WORKERS: "1"
     volumes:
@@ -26,8 +26,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.45"
-          memory: "160MB"
+          cpus: "0.47"
+          memory: "165MB"
 
   nginx:
     image: nginx:1.27-alpine
@@ -42,8 +42,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: "30MB"
+          cpus: "0.06"
+          memory: "20MB"
 
 volumes:
   api-sockets:
