@@ -1,54 +1,35 @@
 package br.com.rinha.fraude;
 
-import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandles;
-import java.lang.invoke.MethodType;
-
 /**
  * Distância euclidiana ao quadrado entre dois vetores int16 (range [-10000, 10000]).
  *
  * Diferença máxima por componente: 20000 → diff² ≤ 400_000_000.
  * Soma de 14 componentes: máx 5_600_000_000 — requer long (estoura int).
  *
- * Tenta resolver via SimdQuantDistanceKernel (Vector API); se falhar,
- * usa fallback escalar com loop totalmente unrolled.
+ * Resolve uma única vez no static init se o SimdQuantDistanceKernel está disponível
+ * e funcional (USE_SIMD). O hot path é uma chamada estática direta — sem
+ * MethodHandle, sem lambda, sem try/catch — para que o JIT consiga inline agressivo
+ * e o SIMD interno fique exposto para escalonamento de instruções.
  */
 final class QuantDistanceKernel {
 
-    @FunctionalInterface
-    private interface Squared {
-        long apply(short[] data, int offset, short[] query);
-    }
-
-    private static final Squared IMPL = resolve();
+    private static final boolean USE_SIMD = probeSimd();
 
     private QuantDistanceKernel() {
     }
 
     static long squared(short[] data, int offset, short[] query) {
-        return IMPL.apply(data, offset, query);
+        return USE_SIMD
+            ? SimdQuantDistanceKernel.squared(data, offset, query)
+            : scalar(data, offset, query);
     }
 
-    private static Squared resolve() {
+    private static boolean probeSimd() {
         try {
-            Class<?> simd = Class.forName("br.com.rinha.fraude.SimdQuantDistanceKernel");
-            MethodHandle handle = MethodHandles.publicLookup().findStatic(
-                simd,
-                "squared",
-                MethodType.methodType(long.class, short[].class, int.class, short[].class)
-            );
-            // Probe com tipos corretos
             short[] probe = new short[Quantization.STRIDE];
-            handle.invokeExact(probe, 0, probe);
-            return (data, off, q) -> {
-                try {
-                    return (long) handle.invokeExact(data, off, q);
-                } catch (Throwable t) {
-                    return scalar(data, off, q);
-                }
-            };
+            return SimdQuantDistanceKernel.squared(probe, 0, probe) == 0L;
         } catch (Throwable t) {
-            return QuantDistanceKernel::scalar;
+            return false;
         }
     }
 

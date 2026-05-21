@@ -7,12 +7,10 @@ COPY src src
 RUN mvn -q -DskipTests package
 
 ########## Stage 2: pré-construção do índice IVF ##########
-# Recebe os recursos da Rinha em /opt/rinha/resources (vem do build context).
 FROM eclipse-temurin:25-jdk AS index-stage
 WORKDIR /work
 COPY --from=build /workspace/target/deteccao-fraude-java-1.0.0-SNAPSHOT.jar /work/app.jar
-# Os arquivos de referência são providos via "additional_contexts: rinha-resources"
-# no docker-compose. Esse path só existe durante o build.
+
 COPY src/main/resources  /opt/rinha/resources
 ENV RINHA_RESOURCES_DIR=/opt/rinha/resources
 ENV RINHA_INDEX_DIR=/opt/rinha/index
@@ -44,8 +42,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=jlink-stage /opt/jre-min /opt/jre
 COPY --from=build /workspace/target/deteccao-fraude-java-1.0.0-SNAPSHOT.jar /app/app.jar
 COPY --from=index-stage /opt/rinha/index /opt/rinha/index
-# Copia apenas os arquivos de runtime necessários (não copia references.json.gz,
-# que só serve ao builder e pesa ~16MB).
 COPY --from=index-stage /opt/rinha/resources/normalization.json /opt/rinha/resources/normalization.json
 COPY --from=index-stage /opt/rinha/resources/mcc_risk.json /opt/rinha/resources/mcc_risk.json
 ENV PATH="/opt/jre/bin:${PATH}"
