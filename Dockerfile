@@ -54,15 +54,17 @@ ENTRYPOINT [ \
     "--enable-native-access=ALL-UNNAMED", \
     "--add-modules", "jdk.incubator.vector", \
     "-XX:+UnlockExperimentalVMOptions", \
-    "-XX:+UseSerialGC", \
-    "-Xms80m", \
-    "-Xmx80m", \
+    "-XX:+UseShenandoahGC", \
+    "-XX:ShenandoahGCHeuristics=compact", \
+    "-Xms96m", \
+    "-Xmx96m", \
     "-Xss256k", \
     "-XX:ReservedCodeCacheSize=24m", \
     "-XX:InitialCodeCacheSize=16m", \
     "-XX:+AlwaysPreTouch", \
     "-XX:-UsePerfData", \
     "-XX:+DisableExplicitGC", \
+    "-Xlog:gc:stderr:time,uptime,level,tags", \
     "-Drinha.warmup.iterations=10000", \
     "-Dfile.encoding=UTF-8", \
     "-jar", "/app/app.jar" \
