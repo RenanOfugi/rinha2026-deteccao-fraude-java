@@ -11,7 +11,6 @@ final class AppConfig {
     final int ivfRefineProbes;
     final int ivfSampleSize;
     final int kmeansIterations;
-    final int ivfMaxBucketSize;
     final int httpWorkers;
     final boolean buildOnStartup;
     final Path udsPath;
@@ -25,7 +24,6 @@ final class AppConfig {
         int ivfRefineProbes,
         int ivfSampleSize,
         int kmeansIterations,
-        int ivfMaxBucketSize,
         int httpWorkers,
         boolean buildOnStartup,
         Path udsPath
@@ -38,7 +36,6 @@ final class AppConfig {
         this.ivfRefineProbes = ivfRefineProbes;
         this.ivfSampleSize = ivfSampleSize;
         this.kmeansIterations = kmeansIterations;
-        this.ivfMaxBucketSize = ivfMaxBucketSize;
         this.httpWorkers = httpWorkers;
         this.buildOnStartup = buildOnStartup;
         this.udsPath = udsPath;
@@ -56,7 +53,6 @@ final class AppConfig {
             intEnv("RINHA_IVF_REFINE_PROBES", 10),
             intEnv("RINHA_IVF_SAMPLE_SIZE", 16_384),
             intEnv("RINHA_KMEANS_ITERATIONS", 6),
-            intEnv("RINHA_IVF_MAX_BUCKET_SIZE", 20_000),
             intEnv("RINHA_HTTP_WORKERS", 1),
             boolEnv("RINHA_BUILD_ON_STARTUP", true),
             udsPath

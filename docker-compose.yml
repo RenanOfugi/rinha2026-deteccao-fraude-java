@@ -6,7 +6,6 @@ services:
       RINHA_IVF_PROBES: "4"
       RINHA_IVF_REFINE_PROBES: "10"
       RINHA_HTTP_WORKERS: "1"
-      RINHA_LATENCY_LOG: "false"
     volumes:
       - api-sockets:/sockets
     deploy:
@@ -22,7 +21,6 @@ services:
       RINHA_IVF_PROBES: "4"
       RINHA_IVF_REFINE_PROBES: "10"
       RINHA_HTTP_WORKERS: "1"
-      RINHA_LATENCY_LOG: "false"
     volumes:
       - api-sockets:/sockets
     deploy:

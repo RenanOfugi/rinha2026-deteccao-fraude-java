@@ -264,7 +264,6 @@ final class HttpServerLoop implements Runnable {
     }
 
     private void handleFraudScore(int bodyStart, int contentLength) throws IOException {
-      long tTotal = LatencyStats.startIfEnabled();
       byte[] data = readBuffer.array();
       byte[] parserBuffer = parser.buffer;
       // Copia o body para o buffer do parser para manter offsets relativos limpos.
@@ -272,11 +271,8 @@ final class HttpServerLoop implements Runnable {
       System.arraycopy(data, bodyStart, parserBuffer, 0, copyLen);
       int idx;
       try {
-        long tParse = LatencyStats.startIfEnabled();
         parser.parseBuffer(copyLen);
         parser.parseRoot(request);
-        LatencyStats.record(LatencyStats.Stage.PARSE_JSON, tParse);
-
         idx = engine.evaluate(request, query, scratch);
         if (idx < 0)
           idx = 0;
@@ -287,10 +283,7 @@ final class HttpServerLoop implements Runnable {
         // que uma falha de parsing pontue como fraude aprovada (peso 3).
         idx = 5;
       }
-      long tWrite = LatencyStats.startIfEnabled();
       writeAll(FRAUD_RESPONSES[idx]);
-      LatencyStats.record(LatencyStats.Stage.WRITE_RESPONSE, tWrite);
-      LatencyStats.record(LatencyStats.Stage.REQUEST_TOTAL, tTotal);
     }
 
     private void writeAll(byte[] payload) throws IOException {

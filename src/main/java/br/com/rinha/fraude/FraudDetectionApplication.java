@@ -25,8 +25,6 @@ public final class FraudDetectionApplication {
             ? HttpServerLoop.forUds(config.udsPath, engine)
             : HttpServerLoop.forInet(config.port, engine);
 
-        LatencyStats.startReporter();
-
         Thread loopThread = Thread.ofPlatform()
             .name("rinha-http-loop")
             .daemon(false)
@@ -43,7 +41,6 @@ public final class FraudDetectionApplication {
             ex.printStackTrace(System.err);
         }
         long durationMs = (System.nanoTime() - t0) / 1_000_000L;
-        LatencyStats.markCollecting();
         loop.markReady();
         System.out.println("Warmup concluido em " + durationMs + " ms (" + WARMUP_ITERATIONS + " iteracoes) — pronto para receber carga");
 

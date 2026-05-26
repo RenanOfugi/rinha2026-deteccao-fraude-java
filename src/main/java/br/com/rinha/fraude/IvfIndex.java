@@ -108,7 +108,6 @@ final class IvfIndex implements AutoCloseable {
         Quantization.quantize(queryFloat, queryQuant, 0);
 
         // Fase 1: selecionar os centroides mais próximos até o limite de refinamento.
-        long tCentroids = LatencyStats.startIfEnabled();
         final short[] cents = centroids;
         final int clusters = clusterCount;
         for (int centroidId = 0; centroidId < clusters; centroidId++) {
@@ -116,17 +115,11 @@ final class IvfIndex implements AutoCloseable {
                     cents, centroidId * Quantization.STRIDE, queryQuant);
             scratch.offerCentroid(centroidId, distance);
         }
-        LatencyStats.record(LatencyStats.Stage.SCAN_CENTROIDS, tCentroids);
 
-        long tInitial = LatencyStats.startIfEnabled();
         scanBuckets(scratch, 0, probes);
-        LatencyStats.record(LatencyStats.Stage.SCAN_BUCKETS_INITIAL, tInitial);
-
         int score = scratch.scoreIndex();
         if (refineProbes > probes && scratch.shouldRefine(score)) {
-            long tRefine = LatencyStats.startIfEnabled();
             scanBuckets(scratch, probes, refineProbes);
-            LatencyStats.record(LatencyStats.Stage.SCAN_BUCKETS_REFINE, tRefine);
             score = scratch.scoreIndex();
         }
         return score;
@@ -139,7 +132,6 @@ final class IvfIndex implements AutoCloseable {
         final byte[] labelBuffer = scratch.labelBuffer;
         final int chunkCap = SearchScratch.BUCKET_CHUNK;
 
-        int totalScanned = 0;
         int limit = Math.min(toProbe, probeIds.length);
         for (int i = fromProbe; i < limit; i++) {
             int centroidId = probeIds[i];
@@ -149,8 +141,6 @@ final class IvfIndex implements AutoCloseable {
             long end   = bucketOffsets[centroidId + 1];
             long count = end - start;
             if (count <= 0L) continue;
-
-            totalScanned += (int) count;
 
             long rOffset = 0L;
             long remaining = count;
@@ -176,7 +166,6 @@ final class IvfIndex implements AutoCloseable {
                 remaining -= chunk;
             }
         }
-        LatencyStats.recordVectorsScanned(totalScanned);
     }
 
     @Override
