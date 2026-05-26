@@ -1,4 +1,5 @@
 services:
+
   api1:
     image: renanofugi/rinha2026-deteccao-fraude:v1
     environment:
