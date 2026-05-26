@@ -133,12 +133,23 @@ final class IvfIndexBuilder {
 
     short[] quantBuffer = new short[Quantization.STRIDE];
     int totalVectors = 0;
+    int overflowedAssignments = 0;
+    final int maxBucketSize = config.ivfMaxBucketSize;
+    // Scratch arrays para nearestAvailableCentroid — reusados, evitam alocação no loop.
+    float[] distScratch = new float[clusterCount];
+    int[] orderScratch = new int[clusterCount];
     try (ReferenceReader reader = new ReferenceReader(config.referencesFile())) {
       while (reader.next()) {
         float[] vector = reader.vector();
-        int centroidId = nearestCentroid(vector, centroids, clusterCount);
+        int centroidId = nearestAvailableCentroid(
+            vector, centroids, clusterCount, bucketSizes, maxBucketSize,
+            distScratch, orderScratch);
+        // Conta vetores que tiveram que ir para 2º/3º/etc por causa do cap.
+        int nearestId = orderScratch[0];
+        if (centroidId != nearestId) {
+          overflowedAssignments++;
+        }
         Quantization.quantize(vector, quantBuffer, 0);
-        // Escreve cada short individualmente (big-endian, padrão DataOutputStream)
 
         ByteBuffer buf = ByteBuffer
             .allocate(Quantization.STRIDE * Short.BYTES)
@@ -165,9 +176,19 @@ final class IvfIndexBuilder {
     }
 
     long[] bucketOffsets = new long[clusterCount + 1];
+    long maxBucket = 0L;
+    long minBucket = Long.MAX_VALUE;
     for (int i = 0; i < clusterCount; i++) {
       bucketOffsets[i + 1] = bucketOffsets[i] + bucketSizes[i];
+      if (bucketSizes[i] > maxBucket) maxBucket = bucketSizes[i];
+      if (bucketSizes[i] < minBucket) minBucket = bucketSizes[i];
     }
+    System.out.println("Balanced k-means: total=" + totalVectors
+        + " overflowed=" + overflowedAssignments
+        + " (" + String.format("%.2f", 100.0 * overflowedAssignments / totalVectors) + "%)"
+        + " maxBucket=" + maxBucket
+        + " minBucket=" + minBucket
+        + " cap=" + maxBucketSize);
 
     try (BufferedOutputStream vectorsOut = new BufferedOutputStream(
         Files.newOutputStream(config.vectorsFile(),
@@ -213,6 +234,51 @@ final class IvfIndexBuilder {
       Files.deleteIfExists(labelBucketFiles[i]);
     }
     Files.deleteIfExists(tempDir);
+  }
+
+  /**
+   * Encontra o centroide mais próximo que ainda tem espaço (bucket size < cap).
+   * Se todos os centroides estiverem cheios, retorna o mais próximo absoluto
+   * (estoura o cap em vez de descartar o vetor).
+   *
+   * orderScratch[0] no retorno é o nearestCentroid absoluto (independente de cap),
+   * útil para contar quantos vetores foram redirecionados.
+   *
+   * Implementação: calcula todas as distâncias, ordena indices por distância
+   * crescente (insertion sort em arrays primitivos — barato para 256 itens),
+   * percorre na ordem até encontrar um com espaço.
+   */
+  private static int nearestAvailableCentroid(
+      float[] vector, float[] centroids, int clusterCount,
+      long[] bucketSizes, int maxBucketSize,
+      float[] distScratch, int[] orderScratch) {
+    for (int centroidId = 0; centroidId < clusterCount; centroidId++) {
+      int base = centroidId * Vectorizer.PADDED_DIMENSIONS;
+      distScratch[centroidId] = DistanceKernel.squared(centroids, base, vector);
+      orderScratch[centroidId] = centroidId;
+    }
+    // Insertion sort indireto sobre orderScratch[] pela ordem de distScratch[].
+    // 256 elementos: O(n²) = 65k comparações; insignificante perto do trabalho
+    // de calcular as distâncias.
+    for (int i = 1; i < clusterCount; i++) {
+      int idx = orderScratch[i];
+      float d = distScratch[idx];
+      int j = i;
+      while (j > 0 && distScratch[orderScratch[j - 1]] > d) {
+        orderScratch[j] = orderScratch[j - 1];
+        j--;
+      }
+      orderScratch[j] = idx;
+    }
+    // Primeiro com espaço.
+    for (int i = 0; i < clusterCount; i++) {
+      int candidate = orderScratch[i];
+      if (bucketSizes[candidate] < maxBucketSize) {
+        return candidate;
+      }
+    }
+    // Todos cheios: retorna o mais próximo (estoura o cap).
+    return orderScratch[0];
   }
 
   private static int nearestCentroid(float[] vector, float[] centroids, int clusterCount) {
