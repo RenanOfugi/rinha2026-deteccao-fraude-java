@@ -28,7 +28,8 @@ final class IvfIndex implements AutoCloseable {
     final double pruneMargin;
     final short[] centroids;
     final long[] bucketOffsets;
-    final float[] bucketRadius; // raio (distância quantizada) de cada bucket
+    final short[] bboxMin; // [cluster*DIM + dim] menor valor da dim no bucket
+    final short[] bboxMax; // [cluster*DIM + dim] maior valor da dim no bucket
     private final Arena arena;
     private final MemorySegment vectorSegment;
     private final MemorySegment labelSegment;
@@ -40,7 +41,8 @@ final class IvfIndex implements AutoCloseable {
             double pruneMargin,
             short[] centroids,
             long[] bucketOffsets,
-            float[] bucketRadius,
+            short[] bboxMin,
+            short[] bboxMax,
             Arena arena,
             MemorySegment vectorSegment,
             MemorySegment labelSegment) {
@@ -50,7 +52,8 @@ final class IvfIndex implements AutoCloseable {
         this.pruneMargin = pruneMargin;
         this.centroids = centroids;
         this.bucketOffsets = bucketOffsets;
-        this.bucketRadius = bucketRadius;
+        this.bboxMin = bboxMin;
+        this.bboxMax = bboxMax;
         this.arena = arena;
         this.vectorSegment = vectorSegment;
         this.labelSegment = labelSegment;
@@ -96,9 +99,13 @@ final class IvfIndex implements AutoCloseable {
                 bucketOffsets[i] = input.readLong();
             }
 
-            float[] bucketRadius = new float[clusterCount];
-            for (int i = 0; i < clusterCount; i++) {
-                bucketRadius[i] = input.readFloat();
+            short[] bboxMin = new short[clusterCount * Quantization.DIM];
+            for (int i = 0; i < bboxMin.length; i++) {
+                bboxMin[i] = input.readShort();
+            }
+            short[] bboxMax = new short[clusterCount * Quantization.DIM];
+            for (int i = 0; i < bboxMax.length; i++) {
+                bboxMax[i] = input.readShort();
             }
 
             Arena arena = Arena.ofShared();
@@ -115,7 +122,7 @@ final class IvfIndex implements AutoCloseable {
             prefetch(labelSegment);
 
             return new IvfIndex(clusterCount, totalVectors, effectiveMaxProbes, config.ivfPruneMargin,
-                    centroids, bucketOffsets, bucketRadius, arena, vectorSegment, labelSegment);
+                    centroids, bucketOffsets, bboxMin, bboxMax, arena, vectorSegment, labelSegment);
         }
     }
 
@@ -124,20 +131,16 @@ final class IvfIndex implements AutoCloseable {
         short[] queryQuant = scratch.queryQuant;
         Quantization.quantize(queryFloat, queryQuant, 0);
 
-        // Fase 1: para cada bucket, calcula o LOWER BOUND da distância de q a
-        // qualquer vetor do bucket: lb = max(0, dist(q,c) - raio(c))². Esse limite
-        // é exato (desigualdade triangular) — se lb > pior do top-K, o bucket
-        // não pode conter vizinho melhor e é descartado SEM perder recall.
-        final short[] cents = centroids;
+        // Fase 1: para cada bucket, lower bound = distância² da query à BOUNDING
+        // BOX do bucket: Σ_dim max(0, min[d]-q[d], q[d]-max[d])². É um limite
+        // inferior exato e muito mais apertado que o raio escalar — se lb > pior
+        // do top-K, o bucket não pode conter vizinho melhor e é descartado sem
+        // perder recall.
         final int clusters = clusterCount;
         final long[] cLower = scratch.centroidDistances; // reusado p/ lower bounds
         final int[] cOrder = scratch.centroidOrder;
-        final float[] radius = bucketRadius;
         for (int c = 0; c < clusters; c++) {
-            long distC2 = QuantDistanceKernel.squared(cents, c * Quantization.STRIDE, queryQuant);
-            double distC = Math.sqrt((double) distC2);
-            double lb = distC - radius[c];
-            cLower[c] = lb <= 0.0 ? 0L : (long) (lb * lb);
+            cLower[c] = bboxLowerBound(c, queryQuant);
             cOrder[c] = c;
         }
         sortByDistance(cOrder, cLower, clusters);
@@ -184,6 +187,30 @@ final class IvfIndex implements AutoCloseable {
             }
         }
         return scratch.scoreIndex();
+    }
+
+    /**
+     * Lower bound (distância²) da query à bounding box do bucket: para cada
+     * dimensão, a folga é 0 se q[d] está dentro de [min,max], senão é a distância
+     * até a borda mais próxima. Soma dos quadrados das folgas. Limite inferior
+     * exato da distância de q a qualquer vetor do bucket.
+     */
+    private long bboxLowerBound(int cluster, short[] q) {
+        final int base = cluster * Quantization.DIM;
+        final short[] mn = bboxMin;
+        final short[] mx = bboxMax;
+        long lb = 0L;
+        for (int d = 0; d < Quantization.DIM; d++) {
+            int qd = q[d];
+            int lo = mn[base + d];
+            int hi = mx[base + d];
+            int gap;
+            if (qd < lo) gap = lo - qd;
+            else if (qd > hi) gap = qd - hi;
+            else continue; // dentro da caixa nesta dim: folga 0
+            lb += (long) gap * gap;
+        }
+        return lb;
     }
 
     /**
@@ -296,16 +323,11 @@ final class IvfIndex implements AutoCloseable {
     /** search() operando sobre query já quantizada, com instrumentação. */
     private int searchQuant(short[] queryQuant, SearchScratch scratch) {
         scratch.reset();
-        final short[] cents = centroids;
         final int clusters = clusterCount;
         final long[] cLower = scratch.centroidDistances;
         final int[] cOrder = scratch.centroidOrder;
-        final float[] radius = bucketRadius;
         for (int c = 0; c < clusters; c++) {
-            long distC2 = QuantDistanceKernel.squared(cents, c * Quantization.STRIDE, queryQuant);
-            double distC = Math.sqrt((double) distC2);
-            double lb = distC - radius[c];
-            cLower[c] = lb <= 0.0 ? 0L : (long) (lb * lb);
+            cLower[c] = bboxLowerBound(c, queryQuant);
             cOrder[c] = c;
         }
         sortByDistance(cOrder, cLower, clusters);

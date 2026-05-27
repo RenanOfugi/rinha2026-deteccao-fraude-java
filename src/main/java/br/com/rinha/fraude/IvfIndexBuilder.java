@@ -18,7 +18,7 @@ import java.util.zip.GZIPInputStream;
 
 final class IvfIndexBuilder {
   static final int MAGIC = 0x49564632;
-  static final int VERSION = 4; // v4: + raio por bucket (poda exata)
+  static final int VERSION = 5; // v5: bbox (min/max por dim) por bucket (poda exata apertada)
 
   private IvfIndexBuilder() {
   }
@@ -156,8 +156,12 @@ final class IvfIndexBuilder {
       System.arraycopy(centroids, base, tmpC, 0, Vectorizer.PADDED_DIMENSIONS);
       Quantization.quantize(tmpC, quantCentroids, i * Quantization.STRIDE);
     }
-    // Raio² (distância quantizada máxima centroide→vetor) por bucket.
-    long[] bucketRadius2 = new long[clusterCount];
+    // Bounding box por dimensão (min/max) de cada bucket no espaço quantizado.
+    // Lower-bound da query à caixa é muito mais apertado que o raio escalar.
+    short[] bboxMin = new short[clusterCount * Quantization.DIM];
+    short[] bboxMax = new short[clusterCount * Quantization.DIM];
+    java.util.Arrays.fill(bboxMin, Short.MAX_VALUE);
+    java.util.Arrays.fill(bboxMax, Short.MIN_VALUE);
 
     short[] quantBuffer = new short[Quantization.STRIDE];
     int totalVectors = 0;
@@ -168,9 +172,13 @@ final class IvfIndexBuilder {
         int centroidId = nearestCentroid(vector, centroids, clusterCount);
         Quantization.quantize(vector, quantBuffer, 0);
 
-        // Atualiza o raio² do bucket no espaço quantizado.
-        long d2 = QuantDistanceKernel.squared(quantCentroids, centroidId * Quantization.STRIDE, quantBuffer);
-        if (d2 > bucketRadius2[centroidId]) bucketRadius2[centroidId] = d2;
+        // Atualiza o bbox do bucket (só as DIM dimensões úteis).
+        int bboxBase = centroidId * Quantization.DIM;
+        for (int d = 0; d < Quantization.DIM; d++) {
+          short v = quantBuffer[d];
+          if (v < bboxMin[bboxBase + d]) bboxMin[bboxBase + d] = v;
+          if (v > bboxMax[bboxBase + d]) bboxMax[bboxBase + d] = v;
+        }
 
         ByteBuffer buf = ByteBuffer
             .allocate(Quantization.STRIDE * Short.BYTES)
@@ -231,9 +239,12 @@ final class IvfIndexBuilder {
       for (long bucketOffset : bucketOffsets) {
         output.writeLong(bucketOffset);
       }
-      // Raio de cada bucket (distância quantizada, sqrt do raio²) em float.
-      for (int i = 0; i < clusterCount; i++) {
-        output.writeFloat((float) Math.sqrt((double) bucketRadius2[i]));
+      // Bounding box (min/max por dim) de cada bucket, em int16.
+      for (short v : bboxMin) {
+        output.writeShort(v);
+      }
+      for (short v : bboxMax) {
+        output.writeShort(v);
       }
     }
 
