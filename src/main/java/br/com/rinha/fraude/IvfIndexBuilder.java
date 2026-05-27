@@ -224,7 +224,7 @@ final class IvfIndexBuilder {
       output.writeInt(Quantization.STRIDE);
       output.writeInt(clusterCount);
       output.writeInt(totalVectors);
-      output.writeInt(config.ivfProbes);
+      output.writeInt(0); // campo legado do formato (probes), ignorado no load
       for (short s : quantCentroids) {
         output.writeShort(s);
       }

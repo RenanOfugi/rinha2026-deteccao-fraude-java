@@ -16,16 +16,6 @@ public final class FraudDetectionApplication {
             IvfIndexBuilder.build(config);
             return;
         }
-        if (args.length > 0 && "build-kd".equals(args[0])) {
-            KdTreeBuilder.build(config);
-            return;
-        }
-        if (args.length > 0 && "self-test-kd".equals(args[0])) {
-            try (KdTree kd = KdTree.load(config)) {
-                kd.selfTest();
-            }
-            return;
-        }
         if (args.length > 0 && "self-test-ivf".equals(args[0])) {
             try (IvfIndex idx = IvfIndex.load(config)) {
                 idx.selfTest();
