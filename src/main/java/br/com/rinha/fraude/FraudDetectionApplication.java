@@ -22,8 +22,8 @@ public final class FraudDetectionApplication {
         DetectionEngine engine = new DetectionEngine(vectorizer, index);
 
         HttpServerLoop loop = config.udsPath != null
-            ? HttpServerLoop.forUds(config.udsPath, engine)
-            : HttpServerLoop.forInet(config.port, engine);
+            ? HttpServerLoop.forUds(config.udsPath, engine, config.httpWorkers)
+            : HttpServerLoop.forInet(config.port, engine, config.httpWorkers);
 
         Thread loopThread = Thread.ofPlatform()
             .name("rinha-http-loop")

@@ -15,18 +15,25 @@ import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Iterator;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * Servidor HTTP/1.1 single-threaded NIO. Suporta TCP (porta) ou Unix Domain
- * Socket (caminho). Cada conexão tem buffers próprios e um parser dedicado,
- * portanto não há contenção entre conexões dentro do mesmo loop.
+ * Servidor HTTP/1.1 NIO. Suporta TCP (porta) ou Unix Domain Socket (caminho).
+ *
+ * Arquitetura: 1 thread de accept + N workers. A thread de accept aceita
+ * conexões no ServerSocketChannel e distribui round-robin entre os workers.
+ * Cada worker tem seu próprio Selector e processa suas conexões em paralelo,
+ * usando a CPU que de outra forma ficaria ociosa enquanto uma thread espera
+ * I/O. O DetectionEngine (Vectorizer + IvfIndex mmap) é read-only e pode ser
+ * compartilhado entre workers sem sincronização. Cada Connection tem buffers,
+ * parser e scratch próprios — zero estado compartilhado mutável no hot path.
  *
  * Atendemos exatamente dois endpoints:
- * GET /ready -> 200 "ready"
- * POST /fraud-score -> 200 application/json (uma de 6 respostas pré-encodadas)
+ *   GET /ready        -> 200 "ready" (ou 503 enquanto warmup não completa)
+ *   POST /fraud-score -> 200 application/json (uma de 6 respostas pré-encodadas)
  *
- * O parser HTTP é mínimo e cobre apenas o que o cenário de teste produz:
- * Content-Length obrigatório, sem chunked, sem upgrades, sem trailers.
+ * Parser HTTP mínimo: Content-Length obrigatório, sem chunked/upgrades/trailers.
  */
 final class HttpServerLoop implements Runnable {
 
@@ -65,19 +72,29 @@ final class HttpServerLoop implements Runnable {
   private final ProtocolFamily protocolFamily;
   private final Path udsPathToCleanup;
   private final DetectionEngine engine;
+  private final int workerCount;
   private volatile boolean running = true;
   private volatile boolean ready = false;
 
+  private Worker[] workers;
+  private Thread[] workerThreads;
+
   HttpServerLoop(SocketAddress bindAddress, ProtocolFamily protocolFamily, Path udsPathToCleanup,
-      DetectionEngine engine) {
+      DetectionEngine engine, int workerCount) {
     this.bindAddress = bindAddress;
     this.protocolFamily = protocolFamily;
     this.udsPathToCleanup = udsPathToCleanup;
     this.engine = engine;
+    this.workerCount = Math.max(1, workerCount);
   }
 
   void stop() {
     running = false;
+    if (workers != null) {
+      for (Worker w : workers) {
+        if (w != null) w.wakeup();
+      }
+    }
   }
 
   void markReady() {
@@ -90,51 +107,60 @@ final class HttpServerLoop implements Runnable {
 
   @Override
   public void run() {
-    try (Selector selector = Selector.open();
-        ServerSocketChannel server = ServerSocketChannel.open(protocolFamily)) {
+    try (ServerSocketChannel server = ServerSocketChannel.open(protocolFamily)) {
       if (protocolFamily == StandardProtocolFamily.INET && bindAddress instanceof InetSocketAddress) {
         server.setOption(StandardSocketOptions.SO_REUSEADDR, true);
       }
       server.bind(bindAddress, 1024);
-      server.configureBlocking(false);
+      server.configureBlocking(true); // accept bloqueante na thread dedicada
 
       if (udsPathToCleanup != null) {
         try {
-          java.nio.file.attribute.PosixFilePermissions
-              .fromString("rwxrwxrwx");
           Files.setPosixFilePermissions(udsPathToCleanup,
               java.nio.file.attribute.PosixFilePermissions.fromString("rwxrwxrwx"));
         } catch (Exception ignored) {
         }
       }
 
-      server.register(selector, SelectionKey.OP_ACCEPT);
+      // Inicia os workers.
+      workers = new Worker[workerCount];
+      workerThreads = new Thread[workerCount];
+      for (int i = 0; i < workerCount; i++) {
+        workers[i] = new Worker(engine, this);
+        workerThreads[i] = Thread.ofPlatform()
+            .name("rinha-worker-" + i)
+            .daemon(false)
+            .start(workers[i]);
+      }
 
+      // Loop de accept: distribui round-robin entre os workers.
+      int next = 0;
       while (running) {
-        int ready = selector.select(1000L);
-        if (ready == 0)
+        SocketChannel client;
+        try {
+          client = server.accept();
+        } catch (IOException io) {
+          if (!running) break;
           continue;
-        Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
-        while (iterator.hasNext()) {
-          SelectionKey key = iterator.next();
-          iterator.remove();
-          if (!key.isValid())
-            continue;
-          try {
-            if (key.isAcceptable()) {
-              accept(server, selector);
-            } else if (key.isReadable()) {
-              readFromConnection(key);
-            }
-          } catch (IOException io) {
-            closeQuietly(key);
-          }
         }
+        if (client == null) continue;
+        client.configureBlocking(false);
+        if (protocolFamily == StandardProtocolFamily.INET) {
+          client.setOption(StandardSocketOptions.TCP_NODELAY, true);
+          client.setOption(StandardSocketOptions.SO_KEEPALIVE, true);
+        }
+        workers[next].enqueue(client);
+        next++;
+        if (next == workerCount) next = 0;
       }
     } catch (IOException ex) {
-      // Logamos via stderr para não puxar dependências de logging.
       System.err.println("HttpServerLoop encerrando: " + ex.getMessage());
     } finally {
+      if (workers != null) {
+        for (Worker w : workers) {
+          if (w != null) w.wakeup();
+        }
+      }
       if (udsPathToCleanup != null) {
         try {
           Files.deleteIfExists(udsPathToCleanup);
@@ -144,36 +170,82 @@ final class HttpServerLoop implements Runnable {
     }
   }
 
-  private void accept(ServerSocketChannel server, Selector selector) throws IOException {
-    SocketChannel client;
-    while ((client = server.accept()) != null) {
-      client.configureBlocking(false);
-      if (protocolFamily == StandardProtocolFamily.INET) {
-        client.setOption(StandardSocketOptions.TCP_NODELAY, true);
-        client.setOption(StandardSocketOptions.SO_KEEPALIVE, true);
+  /**
+   * Worker com Selector próprio. Recebe novas conexões via fila concorrente
+   * (preenchida pela thread de accept) e as registra no seu Selector. Processa
+   * leitura/escrita das conexões sequencialmente dentro da sua thread — sem
+   * contenção com outros workers, exceto pela leitura read-only do índice.
+   */
+  private static final class Worker implements Runnable {
+    private final DetectionEngine engine;
+    private final HttpServerLoop server;
+    private final Selector selector;
+    private final Queue<SocketChannel> pending = new ConcurrentLinkedQueue<>();
+
+    Worker(DetectionEngine engine, HttpServerLoop server) throws IOException {
+      this.engine = engine;
+      this.server = server;
+      this.selector = Selector.open();
+    }
+
+    void enqueue(SocketChannel channel) {
+      pending.add(channel);
+      selector.wakeup();
+    }
+
+    void wakeup() {
+      selector.wakeup();
+    }
+
+    @Override
+    public void run() {
+      try (selector) {
+        while (server.running) {
+          selector.select(1000L);
+
+          // Registra conexões novas enfileiradas pela thread de accept.
+          SocketChannel ch;
+          while ((ch = pending.poll()) != null) {
+            try {
+              Connection connection = new Connection(ch, engine, server);
+              ch.register(selector, SelectionKey.OP_READ, connection);
+            } catch (IOException io) {
+              try { ch.close(); } catch (IOException ignored) {}
+            }
+          }
+
+          Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
+          while (iterator.hasNext()) {
+            SelectionKey key = iterator.next();
+            iterator.remove();
+            if (!key.isValid()) continue;
+            try {
+              if (key.isReadable()) {
+                ((Connection) key.attachment()).onReadable(key);
+              }
+            } catch (IOException io) {
+              closeQuietly(key);
+            }
+          }
+        }
+      } catch (IOException ex) {
+        System.err.println("Worker encerrando: " + ex.getMessage());
       }
-      Connection connection = new Connection(client, engine, this);
-      client.register(selector, SelectionKey.OP_READ, connection);
     }
-  }
 
-  private void readFromConnection(SelectionKey key) throws IOException {
-    Connection connection = (Connection) key.attachment();
-    connection.onReadable(key);
-  }
-
-  private void closeQuietly(SelectionKey key) {
-    try {
-      key.channel().close();
-    } catch (IOException ignored) {
+    private static void closeQuietly(SelectionKey key) {
+      try {
+        key.channel().close();
+      } catch (IOException ignored) {
+      }
+      key.cancel();
     }
-    key.cancel();
   }
 
   /**
-   * Estado de uma conexão. Aloca uma única vez (no `accept`), reaproveita
-   * buffers, parser e scratch durante toda a vida da conexão. Keep-alive
-   * é assumido sempre que o cliente não enviar Connection: close.
+   * Estado de uma conexão. Aloca uma única vez (no accept), reaproveita buffers,
+   * parser e scratch durante toda a vida da conexão. Confinada a um único worker
+   * — nunca acessada por mais de uma thread.
    */
   private static final class Connection {
     private final SocketChannel channel;
@@ -232,7 +304,6 @@ final class HttpServerLoop implements Runnable {
           sendAndClose(key, NOT_FOUND);
           return;
         }
-        // Remove a request consumida e prossegue se houver pipeline.
         readBuffer.position(totalLen);
         readBuffer.compact();
         if (readBuffer.position() == 0) {
@@ -266,7 +337,6 @@ final class HttpServerLoop implements Runnable {
     private void handleFraudScore(int bodyStart, int contentLength) throws IOException {
       byte[] data = readBuffer.array();
       byte[] parserBuffer = parser.buffer;
-      // Copia o body para o buffer do parser para manter offsets relativos limpos.
       int copyLen = Math.min(contentLength, parserBuffer.length);
       System.arraycopy(data, bodyStart, parserBuffer, 0, copyLen);
       int idx;
@@ -297,9 +367,6 @@ final class HttpServerLoop implements Runnable {
       while (writeBuffer.hasRemaining()) {
         int written = channel.write(writeBuffer);
         if (written <= 0) {
-          // Sob carga normal o write é não-bloqueante e completa imediatamente.
-          // Em pressão extrema, aceitamos block-burst aqui para manter o hot path
-          // simples.
           Thread.onSpinWait();
         }
       }
@@ -358,7 +425,6 @@ final class HttpServerLoop implements Runnable {
       int pos = buf.position();
       int lim = pos + headerEnd;
       byte[] arr = buf.array();
-      // procura "Content-Length:" case-insensitive
       byte[] needle = { 'C', 'o', 'n', 't', 'e', 'n', 't', '-', 'L', 'e', 'n', 'g', 't', 'h', ':' };
       outer: for (int i = pos; i + needle.length < lim; i++) {
         for (int j = 0; j < needle.length; j++) {
@@ -423,14 +489,14 @@ final class HttpServerLoop implements Runnable {
     return out;
   }
 
-  static HttpServerLoop forInet(int port, DetectionEngine engine) {
-    return new HttpServerLoop(new InetSocketAddress(port), StandardProtocolFamily.INET, null, engine);
+  static HttpServerLoop forInet(int port, DetectionEngine engine, int workers) {
+    return new HttpServerLoop(new InetSocketAddress(port), StandardProtocolFamily.INET, null, engine, workers);
   }
 
-  static HttpServerLoop forUds(Path path, DetectionEngine engine) throws IOException {
+  static HttpServerLoop forUds(Path path, DetectionEngine engine, int workers) throws IOException {
     Files.deleteIfExists(path);
     Files.createDirectories(path.getParent());
     UnixDomainSocketAddress address = UnixDomainSocketAddress.of(path);
-    return new HttpServerLoop(address, StandardProtocolFamily.UNIX, path, engine);
+    return new HttpServerLoop(address, StandardProtocolFamily.UNIX, path, engine, workers);
   }
 }

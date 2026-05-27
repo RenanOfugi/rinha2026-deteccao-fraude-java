@@ -6,7 +6,7 @@ services:
       RINHA_UDS_PATH: /sockets/api1.sock
       RINHA_IVF_PROBES: "4"
       RINHA_IVF_REFINE_PROBES: "10"
-      RINHA_HTTP_WORKERS: "1"
+      RINHA_HTTP_WORKERS: "2"
     volumes:
       - api-sockets:/sockets
     deploy:
@@ -22,7 +22,7 @@ services:
       RINHA_UDS_PATH: /sockets/api2.sock
       RINHA_IVF_PROBES: "4"
       RINHA_IVF_REFINE_PROBES: "10"
-      RINHA_HTTP_WORKERS: "1"
+      RINHA_HTTP_WORKERS: "2"
     volumes:
       - api-sockets:/sockets
     deploy:
