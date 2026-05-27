@@ -56,8 +56,8 @@ ENTRYPOINT [ \
     "-XX:+UnlockExperimentalVMOptions", \
     "-XX:+UseShenandoahGC", \
     "-XX:ShenandoahGCHeuristics=compact", \
-    "-Xms56m", \
-    "-Xmx56m", \
+    "-Xms80m", \
+    "-Xmx80m", \
     "-Xss256k", \
     "-XX:ReservedCodeCacheSize=24m", \
     "-XX:InitialCodeCacheSize=16m", \
