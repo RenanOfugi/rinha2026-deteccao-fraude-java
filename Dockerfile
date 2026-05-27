@@ -14,8 +14,7 @@ COPY --from=build /workspace/target/deteccao-fraude-java-1.0.0-SNAPSHOT.jar /wor
 COPY src/main/resources  /opt/rinha/resources
 ENV RINHA_RESOURCES_DIR=/opt/rinha/resources
 ENV RINHA_INDEX_DIR=/opt/rinha/index
-ENV RINHA_IVF_CLUSTERS=256
-ENV RINHA_IVF_PROBES=6
+ENV RINHA_IVF_CLUSTERS=2048
 ENV RINHA_IVF_SAMPLE_SIZE=16384
 ENV RINHA_KMEANS_ITERATIONS=15
 RUN java \

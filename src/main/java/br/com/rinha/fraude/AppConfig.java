@@ -12,6 +12,8 @@ final class AppConfig {
     final int ivfSampleSize;
     final int kmeansIterations;
     final int httpWorkers;
+    final int ivfMaxProbes;
+    final double ivfPruneMargin;
     final boolean buildOnStartup;
     final Path udsPath;
 
@@ -25,6 +27,8 @@ final class AppConfig {
         int ivfSampleSize,
         int kmeansIterations,
         int httpWorkers,
+        int ivfMaxProbes,
+        double ivfPruneMargin,
         boolean buildOnStartup,
         Path udsPath
     ) {
@@ -37,6 +41,8 @@ final class AppConfig {
         this.ivfSampleSize = ivfSampleSize;
         this.kmeansIterations = kmeansIterations;
         this.httpWorkers = httpWorkers;
+        this.ivfMaxProbes = ivfMaxProbes;
+        this.ivfPruneMargin = ivfPruneMargin;
         this.buildOnStartup = buildOnStartup;
         this.udsPath = udsPath;
     }
@@ -54,6 +60,12 @@ final class AppConfig {
             intEnv("RINHA_IVF_SAMPLE_SIZE", 16_384),
             intEnv("RINHA_KMEANS_ITERATIONS", 6),
             intEnv("RINHA_HTTP_WORKERS", 1),
+            // Teto de buckets visitados (segurança contra varrer demais).
+            intEnv("RINHA_IVF_MAX_PROBES", 64),
+            // Margem de poda: para de visitar buckets quando dist²(q, centroide)
+            // > worstTopK * margem. margem=1.0 ⇒ poda exata; <1.0 ⇒ mais
+            // agressivo (quase-exato, mais rápido, recall levemente menor).
+            doubleEnv("RINHA_IVF_PRUNE_MARGIN", 1.0),
             boolEnv("RINHA_BUILD_ON_STARTUP", true),
             udsPath
         );
@@ -83,6 +95,25 @@ final class AppConfig {
         return indexDir.resolve("labels.bin");
     }
 
+    // Índice particionado por tag de domínio: 4 partições em subdiretórios p0..p3.
+    static final int N_PARTITIONS = 4;
+
+    Path partitionDir(int tag) {
+        return indexDir.resolve("p" + tag);
+    }
+
+    Path metadataFile(int tag) {
+        return partitionDir(tag).resolve("ivf.meta.bin");
+    }
+
+    Path vectorsFile(int tag) {
+        return partitionDir(tag).resolve("vectors.bin");
+    }
+
+    Path labelsFile(int tag) {
+        return partitionDir(tag).resolve("labels.bin");
+    }
+
     private static String stringEnv(String key, String fallback) {
         String value = System.getenv(key);
         return value == null || value.isBlank() ? fallback : value;
@@ -91,6 +122,11 @@ final class AppConfig {
     private static int intEnv(String key, int fallback) {
         String value = System.getenv(key);
         return value == null || value.isBlank() ? fallback : Integer.parseInt(value);
+    }
+
+    private static double doubleEnv(String key, double fallback) {
+        String value = System.getenv(key);
+        return value == null || value.isBlank() ? fallback : Double.parseDouble(value);
     }
 
     private static boolean boolEnv(String key, boolean fallback) {

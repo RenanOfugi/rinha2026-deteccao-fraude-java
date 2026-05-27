@@ -45,7 +45,7 @@ final class Warmup {
         JsonRequestParser parser = new JsonRequestParser();
         MutableTransactionRequest request = new MutableTransactionRequest();
         float[] query = new float[Vectorizer.PADDED_DIMENSIONS];
-        SearchScratch scratch = new SearchScratch(engine.index().clusterCount, engine.index().refineProbes);
+        SearchScratch scratch = new SearchScratch(engine.index().clusterCount);
 
         byte[][] samples = { SAMPLE_LEGIT, SAMPLE_FRAUD, SAMPLE_WITH_LAST };
         int sink = 0;

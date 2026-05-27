@@ -16,10 +16,34 @@ public final class FraudDetectionApplication {
             IvfIndexBuilder.build(config);
             return;
         }
+        if (args.length > 0 && "build-kd".equals(args[0])) {
+            KdTreeBuilder.build(config);
+            return;
+        }
+        if (args.length > 0 && "self-test-kd".equals(args[0])) {
+            try (KdTree kd = KdTree.load(config)) {
+                kd.selfTest();
+            }
+            return;
+        }
+        if (args.length > 0 && "self-test-ivf".equals(args[0])) {
+            try (IvfIndex idx = IvfIndex.load(config)) {
+                idx.selfTest();
+            }
+            return;
+        }
+        if (args.length > 0 && "self-test-partitioned".equals(args[0])) {
+            for (int tag = 0; tag < AppConfig.N_PARTITIONS; tag++) {
+                System.out.println("--- Particao tag=" + tag + " ---");
+                try (IvfIndex idx = IvfIndex.loadPartition(config, tag)) {
+                    idx.selfTest();
+                }
+            }
+            return;
+        }
         ensureIndex(config);
         Vectorizer vectorizer = Vectorizer.load(config.normalizationFile(), config.mccRiskFile());
-        IvfIndex index = IvfIndex.load(config);
-        DetectionEngine engine = new DetectionEngine(vectorizer, index);
+        DetectionEngine engine = DetectionEngine.load(config, vectorizer);
 
         HttpServerLoop loop = config.udsPath != null
             ? HttpServerLoop.forUds(config.udsPath, engine, config.httpWorkers)
@@ -51,16 +75,25 @@ public final class FraudDetectionApplication {
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
             }
-            index.close();
+            engine.close();
         }));
     }
 
     private static void ensureIndex(AppConfig config) throws IOException {
-        if (Files.exists(config.metadataFile()) && Files.exists(config.vectorsFile()) && Files.exists(config.labelsFile())) {
+        boolean allPresent = true;
+        for (int tag = 0; tag < AppConfig.N_PARTITIONS; tag++) {
+            if (!Files.exists(config.metadataFile(tag))
+                    || !Files.exists(config.vectorsFile(tag))
+                    || !Files.exists(config.labelsFile(tag))) {
+                allPresent = false;
+                break;
+            }
+        }
+        if (allPresent) {
             return;
         }
         if (!config.buildOnStartup) {
-            throw new IOException("Indice IVF nao encontrado em " + config.indexDir);
+            throw new IOException("Indice IVF particionado nao encontrado em " + config.indexDir);
         }
         IvfIndexBuilder.build(config);
     }

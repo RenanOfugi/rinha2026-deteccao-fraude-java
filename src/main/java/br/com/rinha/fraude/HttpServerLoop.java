@@ -262,7 +262,7 @@ final class HttpServerLoop implements Runnable {
       this.channel = channel;
       this.engine = engine;
       this.server = server;
-      this.scratch = new SearchScratch(engine.index().clusterCount, engine.index().refineProbes);
+      this.scratch = new SearchScratch(engine.index().clusterCount);
     }
 
     void onReadable(SelectionKey key) throws IOException {

@@ -18,28 +18,44 @@ import java.util.zip.GZIPInputStream;
 
 final class IvfIndexBuilder {
   static final int MAGIC = 0x49564632;
-  static final int VERSION = 2;
+  static final int VERSION = 4; // v4: + raio por bucket (poda exata)
 
   private IvfIndexBuilder() {
   }
 
   static void build(AppConfig config) throws IOException {
     Files.createDirectories(config.indexDir);
-    float[] centroids = trainCentroids(config.referencesFile(), config.ivfClusters,
-        config.ivfSampleSize, config.kmeansIterations);
-    materializeIndex(config, centroids);
+    // Índice particionado por tag de domínio (unknown_merchant<<1)|has_last_tx.
+    // Os 5 vizinhos reais compartilham a mesma tag (validado pela referência
+    // do 1º lugar: 100% em 5000 queries), então rotear por tag é exato.
+    for (int tag = 0; tag < AppConfig.N_PARTITIONS; tag++) {
+      Files.createDirectories(config.partitionDir(tag));
+      float[] centroids = trainCentroids(config.referencesFile(), tag, config.ivfClusters,
+          config.ivfSampleSize, config.kmeansIterations);
+      int built = materializeIndex(config, tag, centroids);
+      System.out.println("Particao tag=" + tag + ": " + built + " vetores, "
+          + (centroids.length / Vectorizer.PADDED_DIMENSIONS) + " clusters");
+    }
   }
 
-  private static float[] trainCentroids(Path referencesFile, int clusters,
+  /** Tag de domínio de um vetor: bit1 = unknown_merchant (vec[11]>0.5), bit0 = has_last_tx (vec[5]>=0). */
+  static int tagOf(float[] vector) {
+    int unknown = vector[11] > 0.5f ? 1 : 0;
+    int hasLast = vector[5] >= 0.0f ? 1 : 0;
+    return (unknown << 1) | hasLast;
+  }
+
+  private static float[] trainCentroids(Path referencesFile, int tag, int clusters,
       int sampleSize, int iterations) throws IOException {
     List<float[]> sample = new ArrayList<>(sampleSize);
     try (ReferenceReader reader = new ReferenceReader(referencesFile)) {
       while (sample.size() < sampleSize && reader.next()) {
+        if (tagOf(reader.vector()) != tag) continue;
         sample.add(Arrays.copyOf(reader.vector(), Vectorizer.PADDED_DIMENSIONS));
       }
     }
     if (sample.isEmpty())
-      throw new IOException("Dataset de referencias vazio");
+      throw new IOException("Particao " + tag + " sem vetores");
 
     int actualClusters = Math.min(clusters, sample.size());
     float[] centroids = initKMeansPlusPlus(sample, actualClusters);
@@ -108,9 +124,9 @@ final class IvfIndexBuilder {
     return centroids;
   }
 
-  private static void materializeIndex(AppConfig config, float[] centroids) throws IOException {
+  private static int materializeIndex(AppConfig config, int tag, float[] centroids) throws IOException {
     int clusterCount = centroids.length / Vectorizer.PADDED_DIMENSIONS;
-    Path tempDir = config.indexDir.resolve("tmp");
+    Path tempDir = config.partitionDir(tag).resolve("tmp");
     Files.createDirectories(tempDir);
 
     // DataOutputStream para escrever shorts corretamente
@@ -131,14 +147,30 @@ final class IvfIndexBuilder {
               StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING));
     }
 
+    // Quantiza os centroides ANTES da atribuição, para calcular o raio de cada
+    // bucket no MESMO espaço quantizado que o kernel usa no runtime.
+    short[] quantCentroids = new short[clusterCount * Quantization.STRIDE];
+    float[] tmpC = new float[Vectorizer.PADDED_DIMENSIONS];
+    for (int i = 0; i < clusterCount; i++) {
+      int base = i * Vectorizer.PADDED_DIMENSIONS;
+      System.arraycopy(centroids, base, tmpC, 0, Vectorizer.PADDED_DIMENSIONS);
+      Quantization.quantize(tmpC, quantCentroids, i * Quantization.STRIDE);
+    }
+    // Raio² (distância quantizada máxima centroide→vetor) por bucket.
+    long[] bucketRadius2 = new long[clusterCount];
+
     short[] quantBuffer = new short[Quantization.STRIDE];
     int totalVectors = 0;
     try (ReferenceReader reader = new ReferenceReader(config.referencesFile())) {
       while (reader.next()) {
         float[] vector = reader.vector();
+        if (tagOf(vector) != tag) continue;
         int centroidId = nearestCentroid(vector, centroids, clusterCount);
         Quantization.quantize(vector, quantBuffer, 0);
-        // Escreve cada short individualmente (big-endian, padrão DataOutputStream)
+
+        // Atualiza o raio² do bucket no espaço quantizado.
+        long d2 = QuantDistanceKernel.squared(quantCentroids, centroidId * Quantization.STRIDE, quantBuffer);
+        if (d2 > bucketRadius2[centroidId]) bucketRadius2[centroidId] = d2;
 
         ByteBuffer buf = ByteBuffer
             .allocate(Quantization.STRIDE * Short.BYTES)
@@ -170,10 +202,10 @@ final class IvfIndexBuilder {
     }
 
     try (BufferedOutputStream vectorsOut = new BufferedOutputStream(
-        Files.newOutputStream(config.vectorsFile(),
+        Files.newOutputStream(config.vectorsFile(tag),
             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING));
         BufferedOutputStream labelsOut = new BufferedOutputStream(
-            Files.newOutputStream(config.labelsFile(),
+            Files.newOutputStream(config.labelsFile(tag),
                 StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING))) {
       for (int i = 0; i < clusterCount; i++) {
         Files.copy(vectorBucketFiles[i], vectorsOut);
@@ -181,17 +213,10 @@ final class IvfIndexBuilder {
       }
     }
 
-    // Quantiza centroides para int16
-    short[] quantCentroids = new short[clusterCount * Quantization.STRIDE];
-    for (int i = 0; i < clusterCount; i++) {
-      int base = i * Vectorizer.PADDED_DIMENSIONS;
-      float[] tmp = new float[Vectorizer.PADDED_DIMENSIONS];
-      System.arraycopy(centroids, base, tmp, 0, Vectorizer.PADDED_DIMENSIONS);
-      Quantization.quantize(tmp, quantCentroids, i * Quantization.STRIDE);
-    }
+    // quantCentroids já calculado acima (antes da atribuição).
 
     try (DataOutputStream output = new DataOutputStream(new BufferedOutputStream(
-        Files.newOutputStream(config.metadataFile(),
+        Files.newOutputStream(config.metadataFile(tag),
             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)))) {
       output.writeInt(MAGIC);
       output.writeInt(VERSION);
@@ -206,6 +231,10 @@ final class IvfIndexBuilder {
       for (long bucketOffset : bucketOffsets) {
         output.writeLong(bucketOffset);
       }
+      // Raio de cada bucket (distância quantizada, sqrt do raio²) em float.
+      for (int i = 0; i < clusterCount; i++) {
+        output.writeFloat((float) Math.sqrt((double) bucketRadius2[i]));
+      }
     }
 
     for (int i = 0; i < clusterCount; i++) {
@@ -213,6 +242,7 @@ final class IvfIndexBuilder {
       Files.deleteIfExists(labelBucketFiles[i]);
     }
     Files.deleteIfExists(tempDir);
+    return totalVectors;
   }
 
   private static int nearestCentroid(float[] vector, float[] centroids, int clusterCount) {

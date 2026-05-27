@@ -8,25 +8,24 @@ final class SearchScratch {
 
     final long[] bestDistances = new long[K];
     final byte[] bestLabels = new byte[K];
-    final long[] bestCentroidDistances;
-    final int[] bestCentroidIds;
+    // Todos os centroides, para ordená-los por distância e visitar buckets em
+    // ordem de proximidade com poda dinâmica.
+    final long[] centroidDistances;
+    final int[] centroidOrder;
     final short[] quantBucketBuffer = new short[BUCKET_CHUNK * Quantization.STRIDE];
     final byte[] labelBuffer = new byte[BUCKET_CHUNK];
     final short[] queryQuant = new short[Quantization.STRIDE];
     int size;
 
-    SearchScratch(int clusterCount, int probes) {
-        this.bestCentroidDistances = new long[probes];
-        this.bestCentroidIds = new int[probes];
+    SearchScratch(int clusterCount) {
+        this.centroidDistances = new long[clusterCount];
+        this.centroidOrder = new int[clusterCount];
         Arrays.fill(bestDistances, Long.MAX_VALUE);
-        Arrays.fill(bestCentroidDistances, Long.MAX_VALUE);
     }
 
     void reset() {
         Arrays.fill(bestDistances, Long.MAX_VALUE);
         Arrays.fill(bestLabels, (byte) 0);
-        Arrays.fill(bestCentroidDistances, Long.MAX_VALUE);
-        Arrays.fill(bestCentroidIds, -1);
         size = 0;
     }
 
@@ -48,19 +47,9 @@ final class SearchScratch {
         bestLabels[insertAt] = label;
     }
 
-    void offerCentroid(int centroidId, long distance) {
-        int last = bestCentroidDistances.length - 1;
-        if (distance >= bestCentroidDistances[last]) {
-            return;
-        }
-        int insertAt = last;
-        while (insertAt > 0 && distance < bestCentroidDistances[insertAt - 1]) {
-            bestCentroidDistances[insertAt] = bestCentroidDistances[insertAt - 1];
-            bestCentroidIds[insertAt] = bestCentroidIds[insertAt - 1];
-            insertAt--;
-        }
-        bestCentroidDistances[insertAt] = distance;
-        bestCentroidIds[insertAt] = centroidId;
+    /** Pior distância do top-K atual (MAX enquanto não cheio = nunca poda). */
+    long worstDistance() {
+        return size < K ? Long.MAX_VALUE : bestDistances[K - 1];
     }
 
     int fraudVotes() {
@@ -85,29 +74,5 @@ final class SearchScratch {
         if (idx < 0) return 0;
         if (idx > K) return K;
         return idx;
-    }
-
-    boolean shouldRefine(int score) {
-        if (size != K) {
-            return false;
-        }
-        if (score == 2) {
-            return matchesLabels(1, 0, 1, 0, 0)
-                || matchesLabels(0, 1, 1, 0, 0)
-                || matchesLabels(0, 1, 0, 1, 0);
-        }
-        if (score == 3) {
-            return matchesLabels(1, 0, 0, 1, 1)
-                || matchesLabels(0, 0, 1, 1, 1);
-        }
-        return false;
-    }
-
-    private boolean matchesLabels(int l0, int l1, int l2, int l3, int l4) {
-        return bestLabels[0] == l0
-            && bestLabels[1] == l1
-            && bestLabels[2] == l2
-            && bestLabels[3] == l3
-            && bestLabels[4] == l4;
     }
 }
