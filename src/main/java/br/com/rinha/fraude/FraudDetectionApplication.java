@@ -58,6 +58,17 @@ public final class FraudDetectionApplication {
         loop.markReady();
         System.out.println("Warmup concluido em " + durationMs + " ms (" + WARMUP_ITERATIONS + " iteracoes) — pronto para receber carga");
 
+        // Modo AOT_TRAINING: usado no build com -XX:AOTMode=record para o JIT
+        // gravar o profile compilado do hot path. Após o warmup (que já exerceu
+        // engine.evaluate milhares de vezes), o profile está pronto e a JVM sai
+        // limpa para o AOTMode=create gerar o cache.
+        if ("1".equals(System.getenv("AOT_TRAINING"))) {
+            System.out.println("AOT_TRAINING=1: saindo apos warmup para gravar profile AOT");
+            loop.stop();
+            engine.close();
+            System.exit(0);
+        }
+
         Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(() -> {
             loop.stop();
             try {
