@@ -201,8 +201,6 @@ final class HttpServerLoop implements Runnable {
     public void run() {
       try (selector) {
         while (server.running) {
-          selector.select(1000L);
-
           // Registra conexões novas enfileiradas pela thread de accept.
           SocketChannel ch;
           while ((ch = pending.poll()) != null) {
@@ -212,6 +210,16 @@ final class HttpServerLoop implements Runnable {
             } catch (IOException io) {
               try { ch.close(); } catch (IOException ignored) {}
             }
+          }
+
+          // Sob keep-alive, os bytes da próxima request já chegaram no socket
+          // buffer quando terminamos de responder a anterior. selectNow() os
+          // pega sem a syscall epoll_wait bloqueante (~10-50µs poupados por
+          // round-trip). Só bloqueamos em select() quando não há nada pronto
+          // E nenhuma conexão nova pendente na fila.
+          int ready = selector.selectNow();
+          if (ready == 0 && pending.isEmpty()) {
+            selector.select(1000L);
           }
 
           Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
