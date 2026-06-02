@@ -31,7 +31,7 @@ services:
           cpus: "0.47"
           memory: "165MB"
 
-  # Load balancer L4 com FD passing (SCM_RIGHTS) — substitui o nginx.
+  # Load balancer L4 com FD passing (SCM_RIGHTS).
   # Aceita TCP em 9999 e passa o fd da conexão para uma das APIs via os
   # control sockets compartilhados no volume. Sai do data path após o handoff.
   lb:
