@@ -10,10 +10,22 @@ public final class FraudDetectionApplication {
     private FraudDetectionApplication() {
     }
 
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) throws Throwable {
+        // Carrega FdReceiver ANTES de qualquer inicialização de FFM/MemorySegment.
+        // A inicialização da Foreign Memory API (Arena/MemorySegment no IvfIndex)
+        // sela o acesso reflexivo a sun.nio.ch; carregar o <clinit> do FdReceiver
+        // (que faz privateLookupIn em SocketChannelImpl) primeiro evita o
+        // IllegalAccessException. Só no modo FD passing.
+        if (System.getenv("RINHA_FD_SOCKET") != null && !System.getenv("RINHA_FD_SOCKET").isBlank()) {
+            Class.forName("br.com.rinha.fraude.FdReceiver");
+        }
         AppConfig config = AppConfig.fromEnvironment();
         if (args.length > 0 && "build-index".equals(args[0])) {
             IvfIndexBuilder.build(config);
+            return;
+        }
+        if (args.length > 0 && "self-test-fd".equals(args[0])) {
+            FdSelfTest.run();
             return;
         }
         if (args.length > 0 && "self-test-ivf".equals(args[0])) {
@@ -35,14 +47,31 @@ public final class FraudDetectionApplication {
         Vectorizer vectorizer = Vectorizer.load(config.normalizationFile(), config.mccRiskFile());
         DetectionEngine engine = DetectionEngine.load(config, vectorizer);
 
-        HttpServerLoop loop = config.udsPath != null
-            ? HttpServerLoop.forUds(config.udsPath, engine, config.httpWorkers)
-            : HttpServerLoop.forInet(config.port, engine, config.httpWorkers);
-
-        Thread loopThread = Thread.ofPlatform()
-            .name("rinha-http-loop")
-            .daemon(false)
-            .start(loop);
+        // Modo FD passing: se RINHA_FD_SOCKET estiver definido, o LB (Rust) aceita
+        // o TCP e passa o fd; a API só sobe os workers + um FdReceiver. Caso
+        // contrário, usa o accept loop tradicional (nginx via UDS/TCP).
+        String fdSocket = System.getenv("RINHA_FD_SOCKET");
+        HttpServerLoop loop;
+        Thread loopThread = null;
+        FdReceiver fdReceiver = null;
+        if (fdSocket != null && !fdSocket.isBlank()) {
+            loop = HttpServerLoop.forFdPassing(engine, config.httpWorkers);
+            loop.startWorkers();
+            fdReceiver = new FdReceiver(fdSocket, loop::injectChannel);
+            fdReceiver.start();
+            System.out.println("Modo FD passing: control socket " + fdSocket
+                + ", " + config.httpWorkers + " worker(s)");
+        } else {
+            loop = config.udsPath != null
+                ? HttpServerLoop.forUds(config.udsPath, engine, config.httpWorkers)
+                : HttpServerLoop.forInet(config.port, engine, config.httpWorkers);
+            loopThread = Thread.ofPlatform()
+                .name("rinha-http-loop")
+                .daemon(false)
+                .start(loop);
+        }
+        final Thread loopThreadF = loopThread;
+        final FdReceiver fdReceiverF = fdReceiver;
 
         // /ready começa retornando 503. Esquentamos JIT e cache de páginas
         // ANTES de marcar pronto, para que o k6 só comece a fazer carga quando
@@ -71,13 +100,21 @@ public final class FraudDetectionApplication {
 
         Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(() -> {
             loop.stop();
-            try {
-                loopThread.join(2000L);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
+            if (fdReceiverF != null) fdReceiverF.stop();
+            if (loopThreadF != null) {
+                try {
+                    loopThreadF.join(2000L);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
             }
             engine.close();
         }));
+
+        // No modo FD passing, a main não tem o loop bloqueante — segura a JVM viva.
+        if (fdReceiverF != null) {
+            Thread.currentThread().join();
+        }
     }
 
     private static void ensureIndex(AppConfig config) throws IOException {

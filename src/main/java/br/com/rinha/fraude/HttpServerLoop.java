@@ -78,6 +78,7 @@ final class HttpServerLoop implements Runnable {
 
   private Worker[] workers;
   private Thread[] workerThreads;
+  private volatile int injectNext = 0;
 
   HttpServerLoop(SocketAddress bindAddress, ProtocolFamily protocolFamily, Path udsPathToCleanup,
       DetectionEngine engine, int workerCount) {
@@ -86,6 +87,32 @@ final class HttpServerLoop implements Runnable {
     this.udsPathToCleanup = udsPathToCleanup;
     this.engine = engine;
     this.workerCount = Math.max(1, workerCount);
+  }
+
+  /** Sobe apenas os workers (sem socket de escuta) — modo FD passing, onde os
+   *  channels chegam via {@link #injectChannel} a partir do FdReceiver. */
+  void startWorkers() {
+    workers = new Worker[workerCount];
+    workerThreads = new Thread[workerCount];
+    for (int i = 0; i < workerCount; i++) {
+      try {
+        workers[i] = new Worker(engine, this);
+      } catch (IOException e) {
+        throw new RuntimeException("falha ao criar worker", e);
+      }
+      workerThreads[i] = Thread.ofPlatform()
+          .name("rinha-worker-" + i)
+          .daemon(false)
+          .start(workers[i]);
+    }
+  }
+
+  /** Injeta um SocketChannel (recebido via FD passing) num worker round-robin.
+   *  Thread-safe: chamado pela(s) thread(s) do FdReceiver. */
+  void injectChannel(SocketChannel ch) {
+    int n = workerCount;
+    int idx = (injectNext++ & 0x7fffffff) % n;
+    workers[idx].enqueue(ch);
   }
 
   void stop() {
@@ -506,5 +533,11 @@ final class HttpServerLoop implements Runnable {
     Files.createDirectories(path.getParent());
     UnixDomainSocketAddress address = UnixDomainSocketAddress.of(path);
     return new HttpServerLoop(address, StandardProtocolFamily.UNIX, path, engine, workers);
+  }
+
+  /** Modo FD passing: sem socket de escuta próprio. Sobe workers via
+   *  {@link #startWorkers()} e recebe channels via {@link #injectChannel}. */
+  static HttpServerLoop forFdPassing(DetectionEngine engine, int workers) {
+    return new HttpServerLoop(null, StandardProtocolFamily.INET, null, engine, workers);
   }
 }

@@ -52,6 +52,8 @@ ENTRYPOINT [ \
     "java", \
     "--enable-native-access=ALL-UNNAMED", \
     "--add-modules", "jdk.incubator.vector", \
+    "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED", \
+    "--add-opens", "java.base/java.io=ALL-UNNAMED", \
     "-XX:+UnlockExperimentalVMOptions", \
     "-XX:+UseShenandoahGC", \
     "-XX:ShenandoahGCHeuristics=compact", \

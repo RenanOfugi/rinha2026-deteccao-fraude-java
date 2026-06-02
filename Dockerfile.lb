@@ -1,0 +1,10 @@
+# LB em Rust com FD passing (SCM_RIGHTS). Multi-stage: build + runtime slim.
+FROM rust:1-slim AS build
+WORKDIR /src
+COPY src/main/lb-rust/Cargo.toml ./Cargo.toml
+COPY src/main/lb-rust/src ./src
+RUN cargo build --release
+
+FROM debian:12-slim
+COPY --from=build /src/target/release/rinha-lb /usr/local/bin/rinha-lb
+ENTRYPOINT ["/usr/local/bin/rinha-lb"]

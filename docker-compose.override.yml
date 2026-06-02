@@ -1,0 +1,8 @@
+# Override só para teste local: usa imagens locais (sem pull do Hub).
+services:
+  api1:
+    pull_policy: never
+  api2:
+    pull_policy: never
+  lb:
+    pull_policy: never
