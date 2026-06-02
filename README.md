@@ -8,14 +8,20 @@ Este repositório é uma implementação de alta performance em Java 25. O servi
 
 A topologia em runtime consiste em:
 
-- `nginx`: Load balancer distribuindo tráfego via Unix Domain Sockets (UDS).
+- `lb`: Load balancer L4 em Rust que aceita o TCP e **passa o file descriptor**
+  da conexão para uma das APIs via `sendmsg`/`SCM_RIGHTS`. Sai do data path
+  após o handoff — não copia bytes por requisição.
 - `api1` e `api2`: Instâncias da API Java operando em loop NIO single-thread.
+  Recebem o fd cru pelo control socket e leem/escrevem direto no socket do cliente.
 - `index`: Índice vetorial binário (IVF int8) carregado via `mmap`.
 
 Topologia:
 ```text
-client → nginx (porta 9999) → UDS → api1 / api2 (NIO loop + IVF SIMD)
+client → lb (TCP :9999) → [SCM_RIGHTS: passa o fd] → api1 / api2 (NIO loop + IVF SIMD)
 ```
+
+O LB sai do caminho dos dados: depois de entregar o fd, o cliente fala direto
+com a API. Isso elimina o proxy de bytes do hot path e derruba o p99.
 
 ## Classificação
 
@@ -41,22 +47,23 @@ Resposta de exemplo:
 - **Vector API (SIMD)**: Uso de instruções de hardware para processamento paralelo de distâncias.
 - **IVF int8**: Redução de 75% no uso de memória do índice através de quantização escalar.
 - **NIO Customizado**: Servidor HTTP minimalista e parser JSON manual de alta eficiência.
-- **Warmup Ativo**: Execução de 4000 requisições sintéticas no startup para aquecimento do JIT e cache de páginas.
-- **Unix Domain Sockets**: Comunicação entre LB e API sem o overhead do stack TCP local.
+- **Warmup Ativo**: Execução de requisições sintéticas no startup para aquecimento do JIT e cache de páginas.
+- **FD Passing (SCM_RIGHTS)**: O LB passa o file descriptor da conexão para a API e sai do data path, eliminando o proxy de bytes do hot path.
 
 ## Estrutura
 
 - `src/main/java/`: Código fonte da API, parser, vetorizador e kernels SIMD.
+- `src/main/lb-rust/`: Load balancer L4 em Rust (FD passing via SCM_RIGHTS).
 - `data/index/`: Localização do índice binário gerado.
 - `docker-compose.yml`: Topologia oficial da submissão.
-- `nginx.conf`: Configuração do load balancer.
+- `Dockerfile` / `Dockerfile.lb`: Build da API Java e do LB Rust.
 
 ## Configuração
 
 Váriáveis de ambiente principais:
 
-- `PORT`: Porta TCP (padrão 8081).
-- `RINHA_UDS_PATH`: Se definido, ativa comunicação via Unix Socket.
+- `RINHA_FD_SOCKET`: Caminho do control socket. Se definido, ativa o modo FD passing (a API recebe fds do LB em vez de aceitar TCP/UDS).
+- `PORT` / `RINHA_UDS_PATH`: Fallback quando `RINHA_FD_SOCKET` não está definido (accept loop tradicional via TCP ou Unix Socket).
 - `RINHA_IVF_PROBES`: Quantidade de clusters visitados (ajusta precisão vs performance).
 - `RINHA_BUILD_ON_STARTUP`: Reconstrói o índice no boot se não for encontrado.
 
