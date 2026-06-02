@@ -1,6 +1,6 @@
 services:
   api1:
-    image: renanofugi/rinha2026-deteccao-fraude:v13
+    image: renanofugi/rinha2026-deteccao-fraude:v14
     pull_policy: always
     environment:
       RINHA_FD_SOCKET: /sockets/api1-fd.sock
@@ -19,7 +19,7 @@ services:
           memory: "165MB"
 
   api2:
-    image: renanofugi/rinha2026-deteccao-fraude:v13
+    image: renanofugi/rinha2026-deteccao-fraude:v14
     pull_policy: always
     environment:
       RINHA_FD_SOCKET: /sockets/api2-fd.sock
@@ -39,7 +39,7 @@ services:
   # Aceita TCP em 9999 e passa o fd da conexão para uma das APIs via os
   # control sockets compartilhados no volume. Sai do data path após o handoff.
   lb:
-    image: renanofugi/rinha2026-lb:v13
+    image: renanofugi/rinha2026-lb:v14
     pull_policy: always
     depends_on:
       - api1
@@ -58,8 +58,12 @@ services:
           memory: "20MB"
 
 volumes:
-  # Volume compartilhado só para os control sockets do FD passing (handoff de
-  # fd). Os bytes do request NÃO passam por aqui — vão direto pelo fd repassado
-  # ao cliente. O socket de controle é estabelecido uma vez no boot e reusado,
-  # então um tmpfs não traria ganho no p99 (e adicionaria risco de portabilidade).
+  # tmpfs (RAM): os control sockets do FD passing vivem em memória, não em
+  # disco/overlayfs. Tira o filesystem do caminho de bind/connect/accept do
+  # handoff de fd. Os bytes do request não passam por aqui (vão direto pelo fd),
+  # mas o setup da conexão de controle fica mais rápido e previsível.
   api-sockets:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
