@@ -1,12 +1,15 @@
 services:
   api1:
-    image: renanofugi/rinha2026-deteccao-fraude:v12
+    image: renanofugi/rinha2026-deteccao-fraude:v13
     pull_policy: always
     environment:
       RINHA_FD_SOCKET: /sockets/api1-fd.sock
       RINHA_IVF_MAX_PROBES: "256"
       RINHA_IVF_PRUNE_MARGIN: "1.0"
       RINHA_HTTP_WORKERS: "1"
+      # SO_BUSY_POLL (µs) no socket do cliente. 0/vazio = desligado. Ligar só
+      # para medir: queima CPU em 1 vCPU e depende de NIC com NAPI busy poll.
+      RINHA_BUSY_POLL_US: "0"
     volumes:
       - api-sockets:/sockets
     deploy:
@@ -16,13 +19,14 @@ services:
           memory: "165MB"
 
   api2:
-    image: renanofugi/rinha2026-deteccao-fraude:v12
+    image: renanofugi/rinha2026-deteccao-fraude:v13
     pull_policy: always
     environment:
       RINHA_FD_SOCKET: /sockets/api2-fd.sock
       RINHA_IVF_MAX_PROBES: "256"
       RINHA_IVF_PRUNE_MARGIN: "1.0"
       RINHA_HTTP_WORKERS: "1"
+      RINHA_BUSY_POLL_US: "0"
     volumes:
       - api-sockets:/sockets
     deploy:
@@ -31,11 +35,11 @@ services:
           cpus: "0.47"
           memory: "165MB"
 
-  # Load balancer L4 com FD passing (SCM_RIGHTS) — substitui o nginx.
+  # Load balancer L4 com FD passing (SCM_RIGHTS).
   # Aceita TCP em 9999 e passa o fd da conexão para uma das APIs via os
   # control sockets compartilhados no volume. Sai do data path após o handoff.
   lb:
-    image: renanofugi/rinha2026-lb:v12
+    image: renanofugi/rinha2026-lb:v13
     pull_policy: always
     depends_on:
       - api1
@@ -54,4 +58,8 @@ services:
           memory: "20MB"
 
 volumes:
+  # Volume compartilhado só para os control sockets do FD passing (handoff de
+  # fd). Os bytes do request NÃO passam por aqui — vão direto pelo fd repassado
+  # ao cliente. O socket de controle é estabelecido uma vez no boot e reusado,
+  # então um tmpfs não traria ganho no p99 (e adicionaria risco de portabilidade).
   api-sockets:
