@@ -4,22 +4,21 @@ import java.util.Arrays;
 
 final class SearchScratch {
     static final int K = 5;
-    static final int BUCKET_CHUNK = 1024;
 
     final long[] bestDistances = new long[K];
     final byte[] bestLabels = new byte[K];
-    // Todos os centroides, para ordená-los por distância e visitar buckets em
-    // ordem de proximidade com poda dinâmica.
-    final long[] centroidDistances;
-    final int[] centroidOrder;
-    final short[] quantBucketBuffer = new short[BUCKET_CHUNK * Quantization.STRIDE];
-    final byte[] labelBuffer = new byte[BUCKET_CHUNK];
+    // Min-heap (lower-bound, clusterId) para seleção lazy: construído em O(n) e
+    // extraímos só os ~10-60 menores antes da poda parar, evitando o sort total
+    // O(n log n) dos 2048 clusters (que era ~55% do tempo de busca).
+    final long[] heapKeys;
+    final int[] heapVals;
+    int heapSize;
     final short[] queryQuant = new short[Quantization.STRIDE];
     int size;
 
     SearchScratch(int clusterCount) {
-        this.centroidDistances = new long[clusterCount];
-        this.centroidOrder = new int[clusterCount];
+        this.heapKeys = new long[clusterCount];
+        this.heapVals = new int[clusterCount];
         Arrays.fill(bestDistances, Long.MAX_VALUE);
     }
 

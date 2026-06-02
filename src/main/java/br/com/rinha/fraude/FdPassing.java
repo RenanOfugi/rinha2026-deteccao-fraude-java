@@ -46,8 +46,13 @@ final class FdPassing {
     private static final long OFF_CMSG_DATA = 16;
     private static final long CMSG_LEN_VALUE = 20;
 
+    // SO_BUSY_POLL=46, SOL_SOCKET=1: tempo (µs) que o socket faz polling ativo do
+    // NIC antes de bloquear no epoll. Reduz latência de wakeup, ao custo de CPU.
+    private static final int SO_BUSY_POLL = 46;
+
     private static final MethodHandle RECVMSG;
     private static final MethodHandle SENDMSG;
+    private static final MethodHandle SETSOCKOPT;
 
     static {
         Linker linker = Linker.nativeLinker();
@@ -61,6 +66,15 @@ final class FdPassing {
                 lookup.find("recvmsg").orElseThrow(() -> new RuntimeException("recvmsg ausente")), desc);
         SENDMSG = linker.downcallHandle(
                 lookup.find("sendmsg").orElseThrow(() -> new RuntimeException("sendmsg ausente")), desc);
+        FunctionDescriptor sso = FunctionDescriptor.of(
+                ValueLayout.JAVA_INT,    // int (retorno)
+                ValueLayout.JAVA_INT,    // int sockfd
+                ValueLayout.JAVA_INT,    // int level
+                ValueLayout.JAVA_INT,    // int optname
+                ValueLayout.ADDRESS,     // const void* optval
+                ValueLayout.JAVA_INT);   // socklen_t optlen
+        SETSOCKOPT = linker.downcallHandle(
+                lookup.find("setsockopt").orElseThrow(() -> new RuntimeException("setsockopt ausente")), sso);
     }
 
     /** Buffers nativos por thread, reusados — zero alocação por chamada. */
@@ -147,6 +161,24 @@ final class FdPassing {
 
         try {
             return (long) SENDMSG.invokeExact(controlSocketFd, b.msghdr, 0) == 1L;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Ativa SO_BUSY_POLL no fd (tempo em µs). O socket faz polling ativo do NIC
+     * antes de bloquear no epoll — corta latência de wakeup. Requer NIC com
+     * suporte a NAPI busy poll e CAP_NET_ADMIN para valores altos; falha
+     * silenciosa (retorno ignorado) se não suportado. Gated por env var no chamador.
+     * @return true se a syscall retornou 0 (sucesso).
+     */
+    static boolean enableBusyPoll(int fd, int usecs) {
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment optval = arena.allocate(ValueLayout.JAVA_INT);
+            optval.set(ValueLayout.JAVA_INT, 0, usecs);
+            int rc = (int) SETSOCKOPT.invokeExact(fd, SOL_SOCKET, SO_BUSY_POLL, optval, 4);
+            return rc == 0;
         } catch (Throwable t) {
             return false;
         }

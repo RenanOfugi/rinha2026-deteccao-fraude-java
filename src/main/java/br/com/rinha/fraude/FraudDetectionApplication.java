@@ -28,6 +28,10 @@ public final class FraudDetectionApplication {
             FdSelfTest.run();
             return;
         }
+        if (args.length > 0 && "bench".equals(args[0])) {
+            SearchBench.run(config);
+            return;
+        }
         if (args.length > 0 && "self-test-ivf".equals(args[0])) {
             try (IvfIndex idx = IvfIndex.load(config)) {
                 idx.selfTest();

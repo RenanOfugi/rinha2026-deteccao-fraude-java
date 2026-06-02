@@ -99,13 +99,23 @@ final class IvfIndex implements AutoCloseable {
                 bucketOffsets[i] = input.readLong();
             }
 
-            short[] bboxMin = new short[clusterCount * Quantization.DIM];
-            for (int i = 0; i < bboxMin.length; i++) {
-                bboxMin[i] = input.readShort();
+            // Disco grava bbox com stride DIM=14 (sem padding). Em memória,
+            // re-layout para STRIDE=16 (2 shorts de padding zerados por cluster):
+            // isso alinha as leituras SIMD de 8+8 shorts ao limite do cluster, e
+            // o padding (min=max=0) dá gap 0 — não contamina o lower bound.
+            short[] bboxMin = new short[clusterCount * Quantization.STRIDE];
+            short[] bboxMax = new short[clusterCount * Quantization.STRIDE];
+            for (int c = 0; c < clusterCount; c++) {
+                int dst = c * Quantization.STRIDE;
+                for (int d = 0; d < Quantization.DIM; d++) {
+                    bboxMin[dst + d] = input.readShort();
+                }
             }
-            short[] bboxMax = new short[clusterCount * Quantization.DIM];
-            for (int i = 0; i < bboxMax.length; i++) {
-                bboxMax[i] = input.readShort();
+            for (int c = 0; c < clusterCount; c++) {
+                int dst = c * Quantization.STRIDE;
+                for (int d = 0; d < Quantization.DIM; d++) {
+                    bboxMax[dst + d] = input.readShort();
+                }
             }
 
             Arena arena = Arena.ofShared();
@@ -126,77 +136,174 @@ final class IvfIndex implements AutoCloseable {
         }
     }
 
+    /** Copia um vetor cru do segmento mmap (uso de benchmark). */
+    void copyVectorForBench(long byteOffset, short[] dst) {
+        MemorySegment.copy(vectorSegment, ValueLayout.JAVA_SHORT, byteOffset, dst, 0, Quantization.STRIDE);
+    }
+
+    /**
+     * search() instrumentado por sub-fase (uso de benchmark). Preenche acc[]:
+     * acc[0] += nanos em lower-bounds, acc[1] += nanos em sort, acc[2] += nanos
+     * em scan. Mesma lógica de search() — só com cronômetros entre as fases.
+     */
+    int searchTimed(float[] queryFloat, SearchScratch scratch, long[] acc) {
+        scratch.reset();
+        short[] queryQuant = scratch.queryQuant;
+        Quantization.quantize(queryFloat, queryQuant, 0);
+
+        final int clusters = clusterCount;
+        final long[] hk = scratch.heapKeys;
+        final int[] hv = scratch.heapVals;
+
+        long t0 = System.nanoTime();
+        for (int c = 0; c < clusters; c++) {
+            hk[c] = bboxLowerBound(c, queryQuant);
+            hv[c] = c;
+        }
+        long t1 = System.nanoTime();
+        scratch.heapSize = clusters;
+        heapify(hk, hv, clusters);
+        long t2 = System.nanoTime();
+
+        final double margin = pruneMargin;
+        final int limit = Math.min(maxProbes, clusters);
+        for (int i = 0; i < limit && scratch.heapSize > 0; i++) {
+            long lowerBound = hk[0];
+            if (scratch.size >= SearchScratch.K) {
+                long bound = (long) (scratch.worstDistance() * margin);
+                if (lowerBound > bound) break;
+            }
+            int centroidId = extractMin(hk, hv, scratch);
+            long start = bucketOffsets[centroidId];
+            long end = bucketOffsets[centroidId + 1];
+            long count = end - start;
+            if (count <= 0L) continue;
+            long base = start * Quantization.STRIDE * Short.BYTES;
+            for (long v = 0; v < count; v++) {
+                long byteOffset = base + v * Quantization.STRIDE * Short.BYTES;
+                long distance = QuantDistanceKernel.squaredFromSegment(
+                        vectorSegment, byteOffset, queryQuant);
+                if (distance < scratch.worstDistance() || scratch.size < SearchScratch.K) {
+                    byte label = labelSegment.get(ValueLayout.JAVA_BYTE, start + v);
+                    scratch.offerNeighbor(distance, label);
+                }
+            }
+        }
+        long t3 = System.nanoTime();
+        acc[0] += t1 - t0;
+        acc[1] += t2 - t1;
+        acc[2] += t3 - t2;
+        return scratch.scoreIndex();
+    }
+
     int search(float[] queryFloat, SearchScratch scratch) {
         scratch.reset();
         short[] queryQuant = scratch.queryQuant;
         Quantization.quantize(queryFloat, queryQuant, 0);
 
-        // Fase 1: para cada bucket, lower bound = distância² da query à BOUNDING
-        // BOX do bucket: Σ_dim max(0, min[d]-q[d], q[d]-max[d])². É um limite
-        // inferior exato e muito mais apertado que o raio escalar — se lb > pior
-        // do top-K, o bucket não pode conter vizinho melhor e é descartado sem
-        // perder recall.
+        // Fase 1: lower bound = distância² da query à BOUNDING BOX de cada bucket:
+        // Σ_dim max(0, min[d]-q[d], q[d]-max[d])². Limite inferior exato — se lb >
+        // pior do top-K, o bucket não pode conter vizinho melhor (poda sem perder
+        // recall). Em vez de ordenar TODOS os 2048 lower-bounds (O(n log n)), só
+        // precisamos visitá-los em ordem crescente ATÉ a poda parar (~10-60 de
+        // 2048). Construímos um min-heap em O(n) e extraímos sob demanda — o sort
+        // total era ~55% do tempo de busca; o heap troca isso por O(n + k log n).
         final int clusters = clusterCount;
-        final long[] cLower = scratch.centroidDistances; // reusado p/ lower bounds
-        final int[] cOrder = scratch.centroidOrder;
+        final long[] hk = scratch.heapKeys;
+        final int[] hv = scratch.heapVals;
         for (int c = 0; c < clusters; c++) {
-            cLower[c] = bboxLowerBound(c, queryQuant);
-            cOrder[c] = c;
+            hk[c] = bboxLowerBound(c, queryQuant);
+            hv[c] = c;
         }
-        sortByDistance(cOrder, cLower, clusters);
+        scratch.heapSize = clusters;
+        heapify(hk, hv, clusters);
 
-        // Fase 2: visita buckets em ordem de lower bound crescente. Para quando
-        // o lower bound do próximo bucket > pior do top-K (poda exata com
-        // margin=1.0; margin<1 corta mais agressivo, margin>1 mais conservador).
-        final short[] bucketBuffer = scratch.quantBucketBuffer;
-        final byte[] labelBuffer = scratch.labelBuffer;
-        final int chunkCap = SearchScratch.BUCKET_CHUNK;
+        // Fase 2: extrai buckets do heap em ordem de lower bound crescente. Para
+        // quando o menor lower bound restante > pior do top-K (margin=1.0; <1 corta
+        // mais agressivo, >1 mais conservador).
         final double margin = pruneMargin;
         final int limit = Math.min(maxProbes, clusters);
 
-        for (int i = 0; i < limit; i++) {
-            int centroidId = cOrder[i];
-            long lowerBound = cLower[centroidId];
-
+        for (int i = 0; i < limit && scratch.heapSize > 0; i++) {
+            long lowerBound = hk[0];
             if (scratch.size >= SearchScratch.K) {
                 long bound = (long) (scratch.worstDistance() * margin);
                 if (lowerBound > bound) break;
             }
+            int centroidId = extractMin(hk, hv, scratch);
 
             long start = bucketOffsets[centroidId];
             long end = bucketOffsets[centroidId + 1];
             long count = end - start;
             if (count <= 0L) continue;
 
-            long rOffset = 0L;
-            long remaining = count;
-            while (remaining > 0L) {
-                int chunk = (int) Math.min(remaining, chunkCap);
-                long byteOffset = (start + rOffset) * Quantization.STRIDE * Short.BYTES;
-                MemorySegment.copy(vectorSegment, ValueLayout.JAVA_SHORT,
-                        byteOffset, bucketBuffer, 0, chunk * Quantization.STRIDE);
-                MemorySegment.copy(labelSegment, ValueLayout.JAVA_BYTE,
-                        start + rOffset, labelBuffer, 0, chunk);
-                for (int v = 0; v < chunk; v++) {
-                    long distance = QuantDistanceKernel.squared(
-                            bucketBuffer, v * Quantization.STRIDE, queryQuant);
-                    scratch.offerNeighbor(distance, labelBuffer[v]);
+            // Scan lendo o vetor DIRETO do mmap (sem cópia para bucketBuffer).
+            // A cópia de até 24k×16 shorts era pura perda de banda; o kernel
+            // SIMD lê o MemorySegment in-place. Labels são 1 byte — leitura direta.
+            long base = start * Quantization.STRIDE * Short.BYTES;
+            for (long v = 0; v < count; v++) {
+                long byteOffset = base + v * Quantization.STRIDE * Short.BYTES;
+                long distance = QuantDistanceKernel.squaredFromSegment(
+                        vectorSegment, byteOffset, queryQuant);
+                if (distance < scratch.worstDistance() || scratch.size < SearchScratch.K) {
+                    byte label = labelSegment.get(ValueLayout.JAVA_BYTE, start + v);
+                    scratch.offerNeighbor(distance, label);
                 }
-                rOffset += chunk;
-                remaining -= chunk;
             }
         }
         return scratch.scoreIndex();
+    }
+
+    /** Heapify bottom-up: O(n). Min-heap por key, val carrega o clusterId junto. */
+    private static void heapify(long[] key, int[] val, int n) {
+        for (int i = (n >> 1) - 1; i >= 0; i--) {
+            siftDown(key, val, i, n);
+        }
+    }
+
+    /** Extrai o mínimo do min-heap (raiz). Decrementa scratch.heapSize. */
+    private static int extractMin(long[] key, int[] val, SearchScratch scratch) {
+        int n = scratch.heapSize;
+        int min = val[0];
+        int last = n - 1;
+        key[0] = key[last];
+        val[0] = val[last];
+        scratch.heapSize = last;
+        siftDown(key, val, 0, last);
+        return min;
+    }
+
+    private static void siftDown(long[] key, int[] val, int i, int n) {
+        long k = key[i];
+        int v = val[i];
+        while (true) {
+            int left = 2 * i + 1;
+            if (left >= n) break;
+            int smallest = left;
+            int right = left + 1;
+            if (right < n && key[right] < key[left]) smallest = right;
+            if (key[smallest] >= k) break;
+            key[i] = key[smallest];
+            val[i] = val[smallest];
+            i = smallest;
+        }
+        key[i] = k;
+        val[i] = v;
     }
 
     /**
      * Lower bound (distância²) da query à bounding box do bucket: para cada
      * dimensão, a folga é 0 se q[d] está dentro de [min,max], senão é a distância
      * até a borda mais próxima. Soma dos quadrados das folgas. Limite inferior
-     * exato da distância de q a qualquer vetor do bucket.
+     * exato da distância de q a qualquer vetor do bucket. bboxMin/bboxMax têm
+     * stride STRIDE=16 (padding zerado nas dims 14-15 → gap 0). Delega ao kernel
+     * SIMD se disponível; senão usa o fallback escalar.
      */
     private long bboxLowerBound(int cluster, short[] q) {
-        final int base = cluster * Quantization.DIM;
+        final int base = cluster * Quantization.STRIDE;
+        if (BBOX_SIMD) {
+            return SimdBboxKernel.lowerBound(bboxMin, bboxMax, base, q);
+        }
         final short[] mn = bboxMin;
         final short[] mx = bboxMax;
         long lb = 0L;
@@ -213,49 +320,26 @@ final class IvfIndex implements AutoCloseable {
         return lb;
     }
 
-    /**
-     * Ordena order[0..n) pela chave dist[order[i]] crescente. Quicksort com
-     * fallback para insertion sort em subfaixas pequenas. O(n log n) — adequado
-     * para clusterCount de 256 a 4096.
-     */
-    private static void sortByDistance(int[] order, long[] dist, int n) {
-        quicksort(order, dist, 0, n - 1);
-    }
+    /** Resolve uma única vez se o kernel SIMD do bbox está disponível. */
+    private static final boolean BBOX_SIMD = resolveBboxSimd();
 
-    private static void quicksort(int[] order, long[] dist, int lo, int hi) {
-        while (lo < hi) {
-            if (hi - lo < 16) {
-                for (int i = lo + 1; i <= hi; i++) {
-                    int idx = order[i];
-                    long d = dist[idx];
-                    int j = i - 1;
-                    while (j >= lo && dist[order[j]] > d) {
-                        order[j + 1] = order[j];
-                        j--;
-                    }
-                    order[j + 1] = idx;
-                }
-                return;
-            }
-            int mid = lo + (hi - lo) / 2;
-            long pivot = dist[order[mid]];
-            int i = lo, j = hi;
-            while (i <= j) {
-                while (dist[order[i]] < pivot) i++;
-                while (dist[order[j]] > pivot) j--;
-                if (i <= j) {
-                    int t = order[i]; order[i] = order[j]; order[j] = t;
-                    i++; j--;
-                }
-            }
-            // Recursão na menor partição, loop na maior (limita pilha).
-            if (j - lo < hi - i) {
-                quicksort(order, dist, lo, j);
-                lo = i;
-            } else {
-                quicksort(order, dist, i, hi);
-                hi = j;
-            }
+    private static boolean resolveBboxSimd() {
+        try {
+            Class.forName("br.com.rinha.fraude.SimdBboxKernel");
+            // Sanidade: bate o resultado SIMD com o escalar num caso conhecido.
+            short[] mn = new short[Quantization.STRIDE];
+            short[] mx = new short[Quantization.STRIDE];
+            short[] q  = new short[Quantization.STRIDE];
+            // Caixa [100,200] nas 14 dims úteis; q DENTRO em todas exceto duas.
+            for (int d = 0; d < Quantization.DIM; d++) { mn[d] = 100; mx[d] = 200; q[d] = 150; }
+            q[0] = 50;   // abaixo: gap 50
+            q[1] = 250;  // acima:  gap 50
+            // demais dims: dentro (gap 0); padding (14,15): lo=hi=q=0 (gap 0).
+            long simd = SimdBboxKernel.lowerBound(mn, mx, 0, q);
+            long expected = 50L * 50 + 50L * 50;
+            return simd == expected;
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -320,53 +404,46 @@ final class IvfIndex implements AutoCloseable {
     private long instrCompared;
     private long instrBuckets;
 
-    /** search() operando sobre query já quantizada, com instrumentação. */
+    /** search() operando sobre query já quantizada, com instrumentação. Usa o
+     *  mesmo caminho (heap lazy) do search() de produção — valida o recall do
+     *  código real, não de um caminho paralelo. */
     private int searchQuant(short[] queryQuant, SearchScratch scratch) {
         scratch.reset();
         final int clusters = clusterCount;
-        final long[] cLower = scratch.centroidDistances;
-        final int[] cOrder = scratch.centroidOrder;
+        final long[] hk = scratch.heapKeys;
+        final int[] hv = scratch.heapVals;
         for (int c = 0; c < clusters; c++) {
-            cLower[c] = bboxLowerBound(c, queryQuant);
-            cOrder[c] = c;
+            hk[c] = bboxLowerBound(c, queryQuant);
+            hv[c] = c;
         }
-        sortByDistance(cOrder, cLower, clusters);
+        scratch.heapSize = clusters;
+        heapify(hk, hv, clusters);
 
-        final short[] bucketBuffer = scratch.quantBucketBuffer;
-        final byte[] labelBuffer = scratch.labelBuffer;
-        final int chunkCap = SearchScratch.BUCKET_CHUNK;
         final double margin = pruneMargin;
         final int limit = Math.min(maxProbes, clusters);
 
-        for (int i = 0; i < limit; i++) {
-            int centroidId = cOrder[i];
-            long lowerBound = cLower[centroidId];
+        for (int i = 0; i < limit && scratch.heapSize > 0; i++) {
+            long lowerBound = hk[0];
             if (scratch.size >= SearchScratch.K) {
                 long bound = (long) (scratch.worstDistance() * margin);
                 if (lowerBound > bound) break;
             }
+            int centroidId = extractMin(hk, hv, scratch);
             long start = bucketOffsets[centroidId];
             long end = bucketOffsets[centroidId + 1];
             long count = end - start;
             if (count <= 0L) continue;
             instrBuckets++;
-            long rOffset = 0L;
-            long remaining = count;
-            while (remaining > 0L) {
-                int chunk = (int) Math.min(remaining, chunkCap);
-                long byteOffset = (start + rOffset) * Quantization.STRIDE * Short.BYTES;
-                MemorySegment.copy(vectorSegment, ValueLayout.JAVA_SHORT,
-                        byteOffset, bucketBuffer, 0, chunk * Quantization.STRIDE);
-                MemorySegment.copy(labelSegment, ValueLayout.JAVA_BYTE,
-                        start + rOffset, labelBuffer, 0, chunk);
-                for (int v = 0; v < chunk; v++) {
-                    long distance = QuantDistanceKernel.squared(
-                            bucketBuffer, v * Quantization.STRIDE, queryQuant);
-                    scratch.offerNeighbor(distance, labelBuffer[v]);
+            long base = start * Quantization.STRIDE * Short.BYTES;
+            for (long v = 0; v < count; v++) {
+                long byteOffset = base + v * Quantization.STRIDE * Short.BYTES;
+                long distance = QuantDistanceKernel.squaredFromSegment(
+                        vectorSegment, byteOffset, queryQuant);
+                if (distance < scratch.worstDistance() || scratch.size < SearchScratch.K) {
+                    byte label = labelSegment.get(ValueLayout.JAVA_BYTE, start + v);
+                    scratch.offerNeighbor(distance, label);
                 }
-                instrCompared += chunk;
-                rOffset += chunk;
-                remaining -= chunk;
+                instrCompared++;
             }
         }
         return scratch.scoreIndex();

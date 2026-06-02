@@ -56,8 +56,25 @@ final class FdReceiver {
         this.onChannel = onChannel;
     }
 
+    // SO_BUSY_POLL em µs, configurável via env. 0 = desativado (default). Permite
+    // ligar/desligar e medir o efeito sem rebuildar.
+    private static final int BUSY_POLL_US = parseBusyPoll();
+
+    private static int parseBusyPoll() {
+        String v = System.getenv("RINHA_BUSY_POLL_US");
+        if (v == null || v.isBlank()) return 0;
+        try {
+            return Math.max(0, Integer.parseInt(v.trim()));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
     /** Envolve um fd cru de socket TCP num SocketChannel não-bloqueante. */
     static SocketChannel wrapFd(int rawFd) throws Throwable {
+        if (BUSY_POLL_US > 0) {
+            FdPassing.enableBusyPoll(rawFd, BUSY_POLL_US); // best-effort; ignora falha
+        }
         FileDescriptor jfd = new FileDescriptor();
         FD_FIELD.set(jfd, rawFd);
         SocketChannel ch = (SocketChannel) SOCKET_CHANNEL_CTOR.invoke(

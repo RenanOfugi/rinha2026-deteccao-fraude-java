@@ -24,10 +24,36 @@ final class QuantDistanceKernel {
             : scalar(data, offset, query);
     }
 
+    /** Distância² lendo o vetor direto do MemorySegment (sem cópia). No fallback
+     *  escalar, copia o registro para um buffer thread-local e usa scalar(). */
+    static long squaredFromSegment(java.lang.foreign.MemorySegment data, long byteOffset, short[] query) {
+        if (USE_SIMD) {
+            return SimdQuantDistanceKernel.squaredFromSegment(data, byteOffset, query);
+        }
+        short[] tmp = SCALAR_TMP.get();
+        java.lang.foreign.MemorySegment.copy(data, java.lang.foreign.ValueLayout.JAVA_SHORT,
+                byteOffset, tmp, 0, Quantization.STRIDE);
+        return scalar(tmp, 0, query);
+    }
+
+    private static final ThreadLocal<short[]> SCALAR_TMP =
+            ThreadLocal.withInitial(() -> new short[Quantization.STRIDE]);
+
     private static boolean probeSimd() {
         try {
-            short[] probe = new short[Quantization.STRIDE];
-            return SimdQuantDistanceKernel.squared(probe, 0, probe) == 0L;
+            // Valida array-based e segment-based contra o escalar.
+            short[] a = { 10, -20, 30, 40, -50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 0, 0 };
+            short[] q = {  5,  15, 25, 35,  45, 55, 65, 75, 85,  95, 105, 115, 125, 135, 0, 0 };
+            long expected = scalar(a, 0, q);
+            if (SimdQuantDistanceKernel.squared(a, 0, q) != expected) return false;
+            try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
+                java.lang.foreign.MemorySegment seg =
+                        arena.allocate((long) Quantization.STRIDE * Short.BYTES);
+                java.lang.foreign.MemorySegment.copy(a, 0, seg,
+                        java.lang.foreign.ValueLayout.JAVA_SHORT, 0, Quantization.STRIDE);
+                if (SimdQuantDistanceKernel.squaredFromSegment(seg, 0, q) != expected) return false;
+            }
+            return true;
         } catch (Throwable t) {
             return false;
         }
