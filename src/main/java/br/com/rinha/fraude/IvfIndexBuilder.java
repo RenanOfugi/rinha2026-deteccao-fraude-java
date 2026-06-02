@@ -30,11 +30,13 @@ final class IvfIndexBuilder {
     // do 1º lugar: 100% em 5000 queries), então rotear por tag é exato.
     for (int tag = 0; tag < AppConfig.N_PARTITIONS; tag++) {
       Files.createDirectories(config.partitionDir(tag));
-      float[] centroids = trainCentroids(config.referencesFile(), tag, config.ivfClusters,
-          config.ivfSampleSize, config.kmeansIterations);
+      int clusters = config.ivfClustersFor(tag);
+      int sample = config.ivfSampleSizeFor(tag);
+      float[] centroids = trainCentroids(config.referencesFile(), tag, clusters,
+          sample, config.kmeansIterations);
       int built = materializeIndex(config, tag, centroids);
       System.out.println("Particao tag=" + tag + ": " + built + " vetores, "
-          + (centroids.length / Vectorizer.PADDED_DIMENSIONS) + " clusters");
+          + (centroids.length / Vectorizer.PADDED_DIMENSIONS) + " clusters (sample=" + sample + ")");
     }
   }
 

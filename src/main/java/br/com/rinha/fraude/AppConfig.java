@@ -89,6 +89,22 @@ final class AppConfig {
     // Índice particionado por tag de domínio: 4 partições em subdiretórios p0..p3.
     static final int N_PARTITIONS = 4;
 
+    /**
+     * Clusters IVF para uma partição específica. As partições grandes (tag1 ~1.6M,
+     * tag3 ~800k) ganham mais clusters → buckets menores → menos vetores varridos
+     * por bucket visitado, encolhendo o scan do pior caso (que define o p99).
+     * Override por env RINHA_IVF_CLUSTERS_P{tag}; fallback para o global.
+     */
+    int ivfClustersFor(int tag) {
+        return intEnv("RINHA_IVF_CLUSTERS_P" + tag, ivfClusters);
+    }
+
+    /** Sample do k-means para uma partição (escala junto com os clusters p/ não
+     *  subtreinar: ~mesma razão amostras/cluster). Override por env. */
+    int ivfSampleSizeFor(int tag) {
+        return intEnv("RINHA_IVF_SAMPLE_SIZE_P" + tag, ivfSampleSize);
+    }
+
     Path partitionDir(int tag) {
         return indexDir.resolve("p" + tag);
     }
