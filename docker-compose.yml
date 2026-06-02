@@ -1,15 +1,16 @@
 services:
   api1:
-    image: renanofugi/rinha2026-deteccao-fraude:v14
+    image: renanofugi/rinha2026-deteccao-fraude:v15
     pull_policy: always
     environment:
       RINHA_FD_SOCKET: /sockets/api1-fd.sock
       RINHA_IVF_MAX_PROBES: "256"
       RINHA_IVF_PRUNE_MARGIN: "1.0"
       RINHA_HTTP_WORKERS: "1"
-      # SO_BUSY_POLL (µs) no socket do cliente. 0/vazio = desligado. Ligar só
-      # para medir: queima CPU em 1 vCPU e depende de NIC com NAPI busy poll.
-      RINHA_BUSY_POLL_US: "0"
+      # SO_BUSY_POLL (µs) no socket do cliente. 0/vazio = desligado. Ligado em
+      # 50µs: o socket faz polling ativo do NIC antes de bloquear no epoll,
+      # cortando latência de wakeup. Custa CPU (1 vCPU) — medir A/B na Rinha.
+      RINHA_BUSY_POLL_US: "50"
     volumes:
       - api-sockets:/sockets
     deploy:
@@ -19,14 +20,14 @@ services:
           memory: "165MB"
 
   api2:
-    image: renanofugi/rinha2026-deteccao-fraude:v14
+    image: renanofugi/rinha2026-deteccao-fraude:v15
     pull_policy: always
     environment:
       RINHA_FD_SOCKET: /sockets/api2-fd.sock
       RINHA_IVF_MAX_PROBES: "256"
       RINHA_IVF_PRUNE_MARGIN: "1.0"
       RINHA_HTTP_WORKERS: "1"
-      RINHA_BUSY_POLL_US: "0"
+      RINHA_BUSY_POLL_US: "50"
     volumes:
       - api-sockets:/sockets
     deploy:
@@ -39,7 +40,7 @@ services:
   # Aceita TCP em 9999 e passa o fd da conexão para uma das APIs via os
   # control sockets compartilhados no volume. Sai do data path após o handoff.
   lb:
-    image: renanofugi/rinha2026-lb:v14
+    image: renanofugi/rinha2026-lb:v15
     pull_policy: always
     depends_on:
       - api1
